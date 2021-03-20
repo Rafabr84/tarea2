@@ -1,0 +1,228 @@
+---
+title: "Predicción de Abandono"
+author: "Isidoro Garcia"
+date: "2021"
+output: pdf_document
+urlcolor: blue
+graphics: yes
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = NA, message = FALSE,
+                      fig.width = 7, fig.height = 4, fig.align = "right")
+```
+
+```{r, warning=FALSE}
+library(tidyverse)
+library(data.table)
+library(broom)
+library(knitr)
+library(lubridate)
+library(RCT)
+library(gamlr)
+library(ranger)
+library(tree)
+library(parallel)
+library(tidymodels)
+
+library(caret)
+library(e1071)
+```
+
+
+
+## Contexto
+
+Cell2Cell es una compañía de teléfonos celulares que intenta mitigar el abandono de sus usuarios. Te contratan para 1) Encontrar un modelo que prediga el abandono con acierto y para usar los insights de este modelo para proponer una estrategia de manejo de abandono.
+
+
+Las preguntas que contestaremos son:
+
+1. Se puede predecir el abandono con los datos que nos compartieron? 
+
+2. Cuáles son las variables que explican en mayor medida el abandono? 
+
+3. Qué incentivos da Cell2Cell a sus usarios para prevenir el abandono?
+
+4. Cuál es el valor de una estrategia de prevención de abandono focalizada y cómo difiere entre los segmentos de los usuarios? Qué usuarios deberían de recibir incentivos de prevención? Qué montos de incentivos
+
+Nota: Voy a evaluar las tareas con base en la respuesta a cada pregunta. Como hay algunas preguntas que no tienen una respuesta clara, al final ponderaré de acuerdo al poder predictivo de su modelo vs las respuestas sugeridas. 
+
+
+
+\newpage
+
+## Datos
+
+Los dotos los pueden encontrar en `Cell2Cell.Rdata`. En el archivo `Cell2Cell-Database-Documentation.xlsx` pueden encontrar documentación de la base de datos. 
+
+Cargemos los datos
+```{r }
+#load("Bases input/Cell2Cell.Rdata")
+load("/Users/rafa/Documents/Mestrado/Economia Computacional/Tarea2/Cell2Cell.Rdata")
+```
+
+### 1. Qué variables tienen missing values? Toma alguna decisión con los missing values. Justifica tu respuesta
+sapply(cell2cell, function(x) sum(is.na(x)))
+
+# Variables a quitar de la base
+# revenue - mean monthly revenue (dropar da base)
+# mou - minutos utilizados por mes (dropar)
+
+cell2cell <- cell2cell[cell2cell$revenue != "NA",]
+cell2cell <- cell2cell[cell2cell$mou != "NA",]
+
+# Variables a igualar al promedio
+# phones - numero de telefones, igual a media
+# models - numero de modelos, igual a media
+# age1 - idade igual a 0 = NA, promedio
+# age2 - idade igual a 0 = NA, promedio
+
+
+cell2cell$phones[cell2cell$phones == "NA"] <- mean(cell2cell$phones)
+cell2cell$models[cell2cell$models == "NA"] <- mean(cell2cell$models)
+
+cell2cell$age1[cell2cell$age1 == 0] <- mean(cell2cell$age1)
+cell2cell$age1[cell2cell$age2 == 0] <- mean(cell2cell$age2)
+
+cell2cell$age1[is.na(cell2cell$age1)] <- mean(cell2cell$age1, na.rm = T)
+cell2cell$age2[is.na(cell2cell$age2)] <- mean(cell2cell$age2, na.rm = T)
+
+# Variables a igualar valores raros a NA y quitarlos de la base
+# eqpdays - numero de dias com o equipamento, valores negativos = NA, dropar da base
+
+cell2cell$eqpdays[cell2cell$eqpdays < 0] <- NA
+cell2cell <- cell2cell[cell2cell$eqpdays != "NA",]
+
+
+# Variables a igualar a 0
+# recchrge - recurring charge, colocar igual a 0
+# overage - excesso de minutos, colocar igual a 0
+# roam - numero de chamadas de roaming, por igual a 0
+# changem - mudança de minutos, por igual a 0
+# changer - mudanca em revenue, por igual a 0
+
+cell2cell$recchrge[cell2cell$recchrge == "NA"] <- 0
+cell2cell$overage[cell2cell$overage == "NA"] <- 0
+cell2cell$roam[cell2cell$roam == "NA"] <- 0
+cell2cell$changem[cell2cell$changem == "NA"] <- 0
+cell2cell$changer[cell2cell$changer == "NA"] <- 0
+cell2cell$changem[cell2cell$changem == ""] <- 0
+cell2cell$changer[cell2cell$changer == ""] <- 0
+cell2cell$changem[is.na(cell2cell$changem)] <- 0
+cell2cell$changer[is.na(cell2cell$changer)] <- 0
+
+
+
+# Verificando que no quedan más NAs
+sapply(cell2cell, function(x) sum(is.na(x)))
+
+
+### 2. Tabula la distribución de la variable `churn`. Muestra la frecuencia absoluta y relativa. Crees que se debe hacer oversampling/undersamping?  
+table(cell2cell$churn)
+
+
+### 3. (2 pts) Divide tu base en entrenamiento y validación (80/20). Además, considera hacer oversampling (SMOTE) o undersampling. (Tip: Recuerda que el objetivo final es tener muestra ~balanceada en el traning set. En el validation la distribución debe ser la original)
+cell2cell$churn <- as.factor(cell2cell$churn)
+
+# Haciendo el split
+spec = c(train = .8, validate = .2)
+
+g = sample(cut(
+  seq(nrow(cell2cell)), 
+  nrow(cell2cell)*cumsum(c(0,spec)),
+  labels = names(spec)
+))
+
+# Res va contener el train y validate
+res = split(cell2cell, g)
+addmargins(prop.table(table(g)))
+
+# Asignando a bases proprias
+
+train <- res$train
+validation <- res$validate
+
+## Model estimation
+
+Pondremos a competir 3 modelos: 
+
+1. Cross-Validated LASSO-logit
+
+2. Prune Trees
+
+3. Random Forest
+
+### 4 (2 pts). Estima un cross validated LASSO. Muestra el la gráfica de CV Binomial Deviance vs Complejidad
+
+numFolds = trainControl(method="cv", number = 10)
+cpGrid = expand.grid(.cp = seq(0.01, 0.5, 0.01))
+fit <- train(churn ~ . -customer, data = train, method = "gbm", trControl = numFolds,tuneLength=1)
+
+# Random forest?
+# fit2 <- train(churn ~ . -customer, data = train, family = "binomial")
+
+
+### 5. Grafica el Lasso de los coeficientes vs la complejidad del modelo.   
+
+
+\newpage
+
+### 6 (2 pts). Cuál es la $\lambda$ resultante? Genera una tabla con los coeficientes que selecciona el CV LASSO. Cuántas variables deja iguales a cero? Cuales son las 3 variables más importantes para predecir el abandono? Da una explicación intuitiva a la última pregunta
+
+
+### 7. Genera un data frame (usando el validation set) que tenga: `customer`, `churn` y las predicciones del LASSO. 
+
+
+
+### 8. Estima ahora tree. Usa `mindev = 0.05, mincut = 1000` Cuántos nodos terminales salen? Muestra el summary del árbol
+
+
+### 9. Grafica el árbol resultante 
+
+
+### 10. Poda el árbol usando CV. Muestra el resultado. Grafica Tree Size vs Binomial Deviance. Cuál es el mejor tamaño del árbol? Mejora el Error?
+
+
+### 11. Gráfica el árbol final. (Tip: Checa `prune.tree`)
+
+
+### 12. Genera las predicciones del árbol pruned. Guardalas en la base de predicciones. Guarda el score y la prediccion categorica en la misma data frame donde guardaste las predicciones del LASSO
+
+
+
+### 13 (4pts). Corre un Random Forest ahora. Cuál es la $B$ para la que ya no ganamos mucho más en poder predictivo?
+
+- Corre para `num.trees=100,200,300, 500, 700, 800`
+
+- En cada caso, guarda únicamente el `prediction.error`
+
+
+### 14. Escoge un random forest para hacer las predicciones. Grafica la importancia de las variables. Interpreta 
+
+
+
+### 15. Genera las predicciones OOS para el random forest. Guardalas en la misma data.frame que los otros modelos 
+
+
+
+### 16 (2pts). Corre el mismo forest pero ahora con `probability = T`. Esto generará predicciones númericas en lugar de categóricas. Genera las predicciones continuas y guardalas en el mismo data frame
+
+
+### 17 (4 pts). Genera graficas de las curvas ROC para los tres modelos. Cual parece ser mejor?
+
+
+
+### 18. Genera una tabla con el AUC ROC. Cuál es el mejor modelo ? 
+
+
+### 19 (2pts). Escoge un punto de corte para generar predicciones categoricas para el LASSO basado en la Curva ROC. Genera las matrices de confusión para cada modelo. Compáralas. Qué tipo de error es mas pernicioso? 
+
+
+### 20 (2pts). Finalmente, construye una lift table. Esto es, para 20 grupos del score predecido, genera 1) El promedio de las predicciones, 2) el promedio del churn observado. Existe monotonía? El mejor algoritmo es monotónico? (Tip: usa `ntile` para generar los grupos a partir de las predicciones)
+
+
+
+### 21. Concluye. Que estrategia harías con este modelo? Cómo generarías valor a partir de el?
+
+
