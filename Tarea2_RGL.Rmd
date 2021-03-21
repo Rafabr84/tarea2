@@ -143,6 +143,10 @@ addmargins(prop.table(table(g)))
 train <- res$train
 validation <- res$validate
 
+# Haciendo el scalling de los datos
+cols <- col
+
+
 ## Model estimation
 
 Pondremos a competir 3 modelos: 
@@ -155,9 +159,26 @@ Pondremos a competir 3 modelos:
 
 ### 4 (2 pts). Estima un cross validated LASSO. Muestra el la gráfica de CV Binomial Deviance vs Complejidad
 
+# Separando base de predictores (X) de la variable dependiente (Y = churn)
+x_train <- train 
+y_train <- train[, c("customer", "churn")]
+
+#Haciendo la transformacion a matrix
+
+x_train <- sparseMatrix(i =as.numeric(x_train$customer),j= as.numeric(x_train$customer))
+y_train <- as.matrix(y_train)
+
+# Haciendo el Lasso
+lasso <- cv.gamlr(x_train, y_train, verb = T, family=c("gaussian","binomial","poisson"), lmr = .1)
+
+
+
+# Código anterior, method = lasso no jala
 numFolds = trainControl(method="cv", number = 10)
 cpGrid = expand.grid(.cp = seq(0.01, 0.5, 0.01))
-fit <- train(churn ~ . -customer, data = train, method = "gbm", trControl = numFolds,tuneLength=1)
+fit <- train(churn ~ . -customer, data = train, preProcess = "scale", method = "lasso", trControl = numFolds,tuneLength=1)
+
+summary(fit)
 
 # Random forest?
 # fit2 <- train(churn ~ . -customer, data = train, family = "binomial")
