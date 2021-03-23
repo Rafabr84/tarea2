@@ -1,0 +1,346 @@
+---
+title: "Predicción de Abandono"
+author: "Montserrat Aldave"
+date: "2021"
+output: pdf_document
+urlcolor: blue
+graphics: yes
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = NA, message = FALSE,
+                      fig.width = 7, fig.height = 4, fig.align = "right")
+```
+
+```{r, warning=FALSE}
+library(tidyverse)
+library(data.table)
+library(broom)
+library(knitr)
+library(lubridate)
+library(RCT)
+library(gamlr)
+library(ranger)
+library(tree)
+library(parallel)
+library(tidymodels)
+```
+
+
+
+## Contexto
+
+Cell2Cell es una compañía de teléfonos celulares que intenta mitigar el abandono de sus usuarios. Te contratan para 1) Encontrar un modelo que prediga el abandono con acierto y para usar los insights de este modelo para proponer una estrategia de manejo de abandono.
+
+
+Las preguntas que contestaremos son:
+
+1. Se puede predecir el abandono con los datos que nos compartieron? 
+
+2. Cuáles son las variables que explican en mayor medida el abandono? 
+
+3. Qué incentivos da Cell2Cell a sus usarios para prevenir el abandono?
+
+4. Cuál es el valor de una estrategia de prevención de abandono focalizada y cómo difiere entre los segmentos de los usuarios? Qué usuarios deberían de recibir incentivos de prevención? Qué montos de incentivos
+
+Nota: Voy a evaluar las tareas con base en la respuesta a cada pregunta. Como hay algunas preguntas que no tienen una respuesta clara, al final ponderaré de acuerdo al poder predictivo de su modelo vs las respuestas sugeridas. 
+
+
+
+\newpage
+
+## Datos
+
+Los datos los pueden encontrar en `Cell2Cell.Rdata`. En el archivo `Cell2Cell-Database-Documentation.xlsx` pueden encontrar documentación de la base de datos. 
+
+Cargemos los datos
+```{r load base}
+#load('Bases input/Cell2Cell.Rdata')
+
+rm(list=ls())
+load('~/Desktop/Maestria Eco Aplicada/Eco computacional /Tarea2/Cell2Cell.Rdata')
+
+```
+
+### 1. Qué variables tienen missing values? Toma alguna decisión con los missing values. Justifica tu respuesta
+
+```{r 1.Missing values}
+
+# Plot missing values en la base de datos
+library(DataExplorer)
+plot_missing(cell2cell, missing_only = TRUE, title = "Missing values in dataset",
+             theme_config = list(legend.position = c("right")))
+
+# Reemplazar NAs por 0:
+cell2cell$changem[is.na(cell2cell$changem)] <- 0
+cell2cell$changer[is.na(cell2cell$changer)] <- 0
+
+#Quitar valores atipicos 
+cell2cell$eqpdays[cell2cell$eqpdays < 0] <- 0
+
+#Reemplazar por el promedio: 
+cell2cell$age1[is.na(cell2cell$age1)] <-  mean(is.na(cell2cell$age1))
+cell2cell$age2[is.na(cell2cell$age2)] <-  mean(is.na(cell2cell$age2))
+cell2cell$eqpdays[is.na(cell2cell$eqpdays)] <-  mean(cell2cell$eqpdays)
+
+# Drop NAs restantes:
+cell2cell <- na.omit(cell2cell)
+
+summary(cell2cell)
+```
+
+Las variables que tienen missing values son: eqpdays, models, phones, roam, overage, directas, recchrge,  mou, revenue, chnager, changem, age2 y age1.
+
+* Quitar NAs de la base: roam, overage, directas, recchrge
+* Quitar valores atipicos: eqpdays < 0
+* Reemplazar por el promedio: eqpdays, models, phones, age1, age2
+* Reemplazar por 0: changer, changem
+
+
+### 2. Tabula la distribución de la variable `churn`. Muestra la frecuencia absoluta y relativa. Crees que se debe hacer oversampling/undersamping?  
+
+```{r 2.Distr 'churn'}
+
+#Obtengo los datos para hacer mi tabla de frecuencias -
+valores <- c(0,1)
+freq_abs <- summary(as.factor(cell2cell$churn))
+freq.tab <- as.data.frame(cbind(valores, freq_abs))
+freq.tab <- freq.tab %>%
+  mutate(freq_rel = freq_abs/sum(freq_abs))
+
+
+knitr::kable(freq.tab,
+             caption = "Tabla Abandono: frecuencia relativa y absoluta",
+             digits = 2)
+
+```
+ Podemos hacer un undersampling para que la base quede más balanceada (50/50), y dado que tenemos muchas observaciones, no habría tanto problema.
+
+### 3. (2 pts) Divide tu base en entrenamiento y validación (80/20). Además, considera hacer oversampling (SMOTE) o undersampling. (Tip: Recuerda que el objetivo final es tener muestra ~balanceada en el training set. En el validation la distribución debe ser la original)
+
+
+```{r 3.Split sample}
+
+#Dividimos en entrenamiento (80%) y validación (20%)
+data = cell2cell
+set.seed(101) # Set Seed so that same sample can be reproduced in future also
+sample <- sample.int(n = nrow(data), size = floor(.80*nrow(data)), replace = F)
+train <- data[sample, ]
+test  <- data[-sample, ]
+validation = test
+#--------------------------------------------------------------------------------
+
+# Undersampling in training set 
+library(ROSE)
+
+# imbalance on training set
+table(train$churn)
+
+# balanced data set with under-sampling
+train_un <- ovun.sample(churn~., data=train,
+                                  p=0.5, seed=1, 
+                                  method="under")$data
+
+table(train_un$churn)
+
+```
+
+
+## Model estimation
+
+Pondremos a competir 3 modelos: 
+
+1. Cross-Validated LASSO-logit
+
+2. Prune Trees
+
+3. Random Forest
+
+### 4 (2 pts). Estima un cross validated LASSO. Muestra el la gráfica de CV Binomial Deviance vs Complejidad
+
+```{r 4.CV LASSO}
+
+library(fastDummies)
+
+# Creamos los vectores y y la matriz de X's --> trabajeremos con el training set con undersampling: train_un
+Y <-train_un$churn
+
+# Quitamos la Y de nuestras bases
+train_un_x <- train_un %>% 
+  dplyr::select(-c(customer, churn))
+
+testx <- test %>% 
+  dplyr::select(-c(customer, churn))
+
+# La base debe tener puras numericas
+X<-sparse.model.matrix(~.+0, data = train_un_x)
+
+# Clusters for parallelization
+detectCores()
+cl<-makeCluster(12)
+
+#Estima CV LASSO 
+lasso<-cv.gamlr(x = X, y = Y, verb = T, cl = cl, family ='binomial')
+stopCluster(cl)
+
+# Prediciendo.  
+y_pred<- predict(lasso$gamlr, testx ,type ='response',select = lasso$seg.min)
+y_pred<-as.numeric(y_pred)
+
+#Grafica CV Binomial deviance vs Complexity
+plot(lasso)
+
+```
+
+
+### 5. Grafica el Lasso de los coeficientes vs la complejidad del modelo.   
+
+```{r 5.LASSO coef-complex}
+plot(lasso$gamlr)
+```
+
+
+\newpage
+
+### 6 (2 pts). Cuál es la $\lambda$ resultante? Genera una tabla con los coeficientes que selecciona el CV LASSO. Cuántas variables deja iguales a cero? Cuales son las 3 variables más importantes para predecir el abandono? Da una explicación intuitiva a la última pregunta
+
+```{r 6.Coefs CV LASSO}
+#Lambda resultante
+lambda.min <- as.data.frame(lasso$lambda.min)
+lambda.1se <-as.data.frame(lasso$lambda.1se)
+kable(cbind(lambda.min, lambda.1se),
+      caption = "Lambda",
+      col.names = c("min", "1se"))
+
+
+#Tabla coefs que selecciona el LASSO
+#coef(lasso, select="min")
+B <- coef(lasso)[-1,] 
+B[c(which.min(B),which.max(B))]
+
+coefs <- as.data.frame(B) %>%
+  filter(B !=0)
+
+kable(coefs,
+      caption = "Coefs que selecciona el LASSO")
+
+#Variables que deja en 0
+coefs_0 <- as.data.frame(B) %>%
+  filter(B == 0)
+
+kable(coefs_0,
+      caption = "Coefs que deja en 0 el LASSO")
+
+#No. variables que deja en 0
+nrow(coefs_0)
+
+# 3 variables mas importantes
+coefs <- abs(coefs) %>% arrange(desc(B))
+coefs <- tibble::rownames_to_column(coefs, "Variable")
+
+
+kable(coefs[1:3,] ,
+      caption = "3 variables más importantes en LASSO",
+      col.names = c("Variable"))
+
+```
+
+
+La variable 'retcall' se refiere al número de llamadas realizadas al usuario por el equipo de retención, en el que convencen al cliente de renovar y le ofrecen ofertas, por lo que tiene mucho sentido que sea una de las variablas más importantes para explicar la decisión de abandono o no.
+
+Por otro lado, la variable 'creditaa' se refiere a una alta calificación crediticia, por lo que podría el cliente seguir utilizando su línea de crédito para seguir teniendo el servicio aún si no cuenta con la liquidez necesaria en algún momento.
+
+Por último, la variable 'refurb' se refiere a la renovación del equipo, por lo que es lógico que ante dicha renovación cuando se acaba el mes de servicio, le inviten al cliente a continuar con el mismo y  no abandone.
+
+
+### 7. Genera un data frame (usando el validation set) que tenga: `customer`, `churn` y las predicciones del LASSO. 
+
+```{r 7.LASSO predic}
+eval <- validation %>%
+                  select(customer, churn) %>%
+                  mutate(churn_pred = y_pred)
+
+eval <- eval %>%
+  mutate(churn = as.factor(churn),
+         y_pred = as.numeric(y_pred))
+
+# Roc curve
+library(ROCR)
+roc <- roc_curve(data=eval, truth = churn, y_pred)
+ggplot(roc,aes(x = specificity, y = sensitivity))+geom_abline(slope = -1, intercept = 1, linetype ='dashed')+geom_path()+theme_bw()
+
+roc_auc(eval, truth = churn, y_pred)
+
+```
+
+
+### 8. Estima ahora tree. Usa `mindev = 0.05, mincut = 1000` Cuántos nodos terminales salen? Muestra el summary del árbol
+
+```{r 8.Tree}
+library(tree)
+
+# Separo mi muestra en train y test sets.
+set.seed(100)
+train <- sample(1:nrow(cell2cell), size = nrow(cell2cell)*4/5)
+test <- cell2cell[-train,]
+
+# Tree
+arbol_clasificacion <- tree(formula = churn ~ ., data = cell2cell, subset = train,
+                            control = tree.control(nobs= length(train), 
+                                                   mincut = 1000,  mindev = 0.05))
+
+summary(arbol_clasificacion)
+
+```
+
+
+### 9. Grafica el árbol resultante 
+
+No se puede graficar, ya que solo tiene un nodo.
+
+
+### 10. Poda el árbol usando CV. Muestra el resultado. Grafica Tree Size vs Binomial Deviance. Cuál es el mejor tamaño del árbol? Mejora el Error?
+
+
+### 11. Gráfica el árbol final. (Tip: Checa `prune.tree`)
+
+
+### 12. Genera las predicciones del árbol pruned. Guardalas en la base de predicciones. Guarda el score y la prediccion categorica en la misma data frame donde guardaste las predicciones del LASSO
+
+
+
+### 13 (4pts). Corre un Random Forest ahora. Cuál es la $B$ para la que ya no ganamos mucho más en poder predictivo?
+
+- Corre para `num.trees=100,200,300, 500, 700, 800`
+
+- En cada caso, guarda únicamente el `prediction.error`
+
+
+### 14. Escoge un random forest para hacer las predicciones. Grafica la importancia de las variables. Interpreta 
+
+
+
+### 15. Genera las predicciones OOS para el random forest. Guardalas en la misma data.frame que los otros modelos 
+
+
+
+### 16 (2pts). Corre el mismo forest pero ahora con `probability = T`. Esto generará predicciones númericas en lugar de categóricas. Genera las predicciones continuas y guardalas en el mismo data frame
+
+
+### 17 (4 pts). Genera graficas de las curvas ROC para los tres modelos. Cual parece ser mejor?
+
+
+
+### 18. Genera una tabla con el AUC ROC. Cuál es el mejor modelo ? 
+
+
+### 19 (2pts). Escoge un punto de corte para generar predicciones categoricas para el LASSO basado en la Curva ROC. Genera las matrices de confusión para cada modelo. Compáralas. Qué tipo de error es mas pernicioso? 
+
+
+### 20 (2pts). Finalmente, construye una lift table. Esto es, para 20 grupos del score predecido, genera 1) El promedio de las predicciones, 2) el promedio del churn observado. Existe monotonía? El mejor algoritmo es monotónico? (Tip: usa `ntile` para generar los grupos a partir de las predicciones)
+
+
+
+### 21. Concluye. Que estrategia harías con este modelo? Cómo generarías valor a partir de el?
+
+
