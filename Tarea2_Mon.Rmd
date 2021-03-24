@@ -501,3 +501,42 @@ rm(Modelos, AUC)
 Todos los modelos tienen un AUC por debajo de 0.5, lo que indica que en general son malos prediciendo.
 
 
+### 19 (2pts). Escoge un punto de corte para generar predicciones categoricas para el LASSO basado en la Curva ROC. Genera las matrices de confusión para cada modelo. Compáralas. Qué tipo de error es mas pernicioso? 
+
+```{r Matriz de confusion}
+#Punto de corte: 0.5
+
+#predic LASSO
+predicciones <- predicciones %>%
+  mutate(y_lasso_cat = ifelse(Y_lasso < 0.5, 0, 1),
+         y_pruned_cat = ifelse(Y_lasso < 0.5, 0, 1))
+
+# Matriz de confusión
+ paste("La matriz de confusión para el CV LASSO es:" )
+ table(predicted = predicciones$y_lasso_cat, actual = test$churn)  
+ 
+  paste("La matriz de confusión para el CV Pruned tree es:" )
+ table(predicted = predicciones$y_pruned_cat, actual = test$churn)  
+ 
+  paste("La matriz de confusión para el Random Forest es:" )
+ table(predicted = predicciones$Y_randomfor, actual = test$churn)  
+ 
+ # Función 'accuracy'
+accuracy = function(actual, predicted) {
+ mean(actual == predicted)*100
+}
+
+ paste("El porcentaje de acierto de un CV LASSO es de:", 
+       accuracy(predicted = predicciones$y_lasso_cat, actual = test$churn), "%")
+ 
+paste("El porcentaje de acierto de un CV Pruned tree  es de:", 
+       accuracy(predicted = predicciones$y_pruned_cat, actual = test$churn), "%")
+  
+ paste("El porcentaje de acierto de un Random Forest es de :", 
+       accuracy(predicted = predicciones$Y_randomfor, actual = test$churn), "%")
+ 
+```
+
+Se elige como punto de corte 0.5, por lo que todo valor <0.5 se considera como 0, y cualquier valor >=0.5 se considera como 1. 
+
+El Accuracy es mayor para el modelo de Random Forest, con un porcentaje de acierto del 59%.
