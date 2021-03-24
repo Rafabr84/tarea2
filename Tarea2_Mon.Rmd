@@ -479,3 +479,25 @@ grid.arrange(g1, g2, g3,
 ```
 
 Los tres modelos tienen un poder de predicción muy pobre, incluso por debajo de un modelo aleatorio. El "menos peor" es el CV LASSO.
+
+### 18. Genera una tabla con el AUC ROC. Cuál es el mejor modelo ? 
+
+```{r Tabla AUC ROC}
+
+auc1 <- roc_auc(predicciones, truth = churn, Y_lasso)
+auc2 <- roc_auc(predicciones, truth = churn, Y_prunedtree)
+auc3 <- roc_auc(predicciones, truth = churn, Y_randomfor_prob1)
+
+Modelos <- c("CV LASSO", "CV Pruned tree", "Random forest")
+AUC <- c(auc1$.estimate, auc2$.estimate, auc3$.estimate)
+AUC_ROC <- cbind(Modelos, AUC)
+
+kable(AUC_ROC,
+      digits=3,
+      caption = "AUC ROC")
+
+rm(Modelos, AUC)
+```
+Todos los modelos tienen un AUC por debajo de 0.5, lo que indica que en general son malos prediciendo.
+
+
