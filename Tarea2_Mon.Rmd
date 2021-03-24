@@ -448,3 +448,34 @@ predicciones <- predicciones %>%
                                 Y_randomfor_prob1 = as.numeric(pred_val1[,2]))
 
 ```
+
+### 17 (4 pts). Genera graficas de las curvas ROC para los tres modelos. Cual parece ser mejor?
+
+```{r Curvas ROC}
+#Curvas ROC para LASSO, Tree y Random Forest 
+
+roc_lasso <- roc_curve(data=predicciones, truth = churn, Y_lasso)
+roc_pruned <- roc_curve(data=predicciones, truth = churn, Y_prunedtree)
+roc_rf <- roc_curve(data=predicciones, truth = churn, Y_randomfor_prob1)
+
+
+g1 <- ggplot(roc_lasso,aes(x = specificity, y = sensitivity))+geom_abline(slope = -1, intercept = 1, linetype ='dashed')+geom_path(col = "plum3")+theme_bw()+
+    labs(title = "CV LASSO") +
+    theme(plot.title = element_text(hjust = 0.5))
+
+g2 <- ggplot(roc_pruned,aes(x = specificity, y = sensitivity))+geom_abline(slope = -1, intercept = 1, linetype ='dashed')+geom_path(col = "pink")+theme_bw()+
+    labs(title = "CV Pruned tree") +
+    theme(plot.title = element_text(hjust = 0.5))
+
+g3 <- ggplot(roc_rf,aes(x = specificity, y = sensitivity))+geom_abline(slope = -1, intercept = 1, linetype ='dashed')+geom_path(col = "lightblue3")+theme_bw()+
+    labs(title = "Random Forest") +
+    theme(plot.title = element_text(hjust = 0.5))
+
+
+library("gridExtra")
+grid.arrange(g1, g2, g3,
+             ncol = 2)
+
+```
+
+Los tres modelos tienen un poder de predicción muy pobre, incluso por debajo de un modelo aleatorio. El "menos peor" es el CV LASSO.
