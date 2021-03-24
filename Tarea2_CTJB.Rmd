@@ -1,0 +1,654 @@
+---
+title: "Prediccion de Abandono"
+author: "Carlos Tabares"
+date: "2021"
+output: pdf_document
+urlcolor: blue
+graphics: yes
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = NA, message = FALSE,
+                      fig.width = 7, fig.height = 4, fig.align = "right")
+```
+
+```{r, warning=FALSE}
+library(tidyverse)
+library(data.table)
+library(broom)
+library(knitr)
+library(lubridate)
+library(RCT)
+library(gamlr)
+library(ranger)
+library(tree)
+library(parallel)
+library(tidymodels)
+library(fastDummies)
+```
+
+
+## Contexto
+
+Cell2Cell es una compania de telefonos celulares que intenta mitigar el abandono de sus usuarios. Te contratan para 1) Encontrar un modelo que prediga el abandono con acierto y para usar los insights de este modelo para proponer una estrategia de manejo de abandono.
+
+
+Las preguntas que contestaremos son:
+
+1. Se puede predecir el abandono con los datos que nos compartieron? 
+
+2. Cuales son las variables que explican en mayor medida el abandono? 
+
+3. Que incentivos da Cell2Cell a sus usarios para prevenir el abandono?
+
+4. Cual es el valor de una estrategia de prevencion de abandono focalizada y como difiere entre los segmentos de los usuarios? Que usuarios deberian de recibir incentivos de prevencion? Que montos de incentivos
+
+Nota: Voy a evaluar las tareas con base en la respuesta a cada pregunta. Como hay algunas preguntas que no tienen una respuesta clara, al final ponderara de acuerdo al poder predictivo de su modelo vs las respuestas sugeridas. 
+
+
+
+\newpage
+
+## Datos
+
+Los datos los pueden encontrar en `Cell2Cell.Rdata`. En el archivo `Cell2Cell-Database-Documentation.xlsx` pueden encontrar documentaciÃ³n de la base de datos. 
+
+Cargemos los datos
+```{r }
+setwd("C:/Users/Carlos/Documents/MEA/Eco Computacional/Tarea 2")
+load('Bases input/Cell2Cell.Rdata')
+```
+
+### 1. Que variables tienen missing values? Toma alguna decision con los missing values. Justifica tu respuesta
+Dado que la mayoria de las variables exhibe un bajo porcentaje de valores faltantes, podemos filtrar a las observaciones con registros faltantes sin el riesgo de perder mucha informacion.
+Para las variables de edad del los miembros de la familia, cuya proporción de missing values es de 1.8% del total de observaciones, se realiza una imputacion de la media de los valores
+```{r}
+faltantes <- map_dbl(cell2cell,function(x) x = sum(100*is.na(x)/nrow(cell2cell)))
+faltantes[faltantes>0]
+
+cell2cell$age1[is.na(cell2cell$age1)] <- median(cell2cell$age1, na.rm = T)
+cell2cell$age2[is.na(cell2cell$age2)] <- median(cell2cell$age2, na.rm = T)
+
+cell2cell <- cell2cell%>%
+  filter(!is.na(revenue) & !is.na(changem) & !is.na(phones))
+
+```
+
+
+### 2. Tabula la distribucion de la variable `churn`. Muestra la frecuencia absoluta y relativa. Crees que se debe hacer oversampling/undersamping?  
+
+Dado que la distribucion del abandono en la base es de al rededor del 28%, podemos pensar en balancear las clases mediante un undersampling de la clase mas comun sin correr el riesgo de quedarnos con muy pocas observaciones. Este metodo consiste en llevar a cabo un muestreo aleatorio de observaciones de la clase mas comun que sea equivalente a la proporcion de la clase menos comun.
+```{r}
+#Frecuencia Absoluta
+table(cell2cell$churn)
+
+#Frecuencia Relativa
+prop.table(table(cell2cell$churn))
+```
+
+
+### 3. (2 pts) Divide tu base en entrenamiento y validacion (80/20). Ademas, considera hacer oversampling (SMOTE) o undersampling. (Tip: Recuerda que el objetivo final es tener muestra ~balanceada en el traning set. En el validation la distribucion debe ser la original)
+
+Primero vamos a convertir las variables continuas a categoricas y posteriormente a dummies para lograr que el modelo seleccione las variables mas relevantes
+
+```{r}
+# Vamos a hacer una distribucion 80 - 20 entre el training y validation set
+
+# Generamos una variable de cuartiles de revenue para considerar como estrato en la division de la base
+cell2cell <- cell2cell%>%
+  mutate(cuartiles_revenue = ntile_label(revenue,4,0))
+
+#Hacemos la aleatorizacion para dividir la base
+asignacion <- treatment_assign(cell2cell, 
+                               share_control = 0.80,
+                               n_t = 1,
+                               strata_varlist = c("churn","cuartiles_revenue"),
+                               seed = 1994,
+                               key="customer")
+
+list2env(asignacion, envir = .GlobalEnv)
+
+cell2cell <- left_join(cell2cell,
+                       data%>%ungroup()%>%select(customer,treat),
+                       by="customer")
+
+cell2cell$cuartiles_revenue <- NULL
+
+```
+
+Dividimos la base en entrenamiento y validacion y revisamos que la base de entrenamiento se encuentra balanceada por clases
+```{r}
+# Base de entrenamiento (80%)
+training_set <- cell2cell%>%
+  filter(treat==0)
+
+#Base de validacion (20%)
+validation_set <- cell2cell%>%
+  filter(treat==1)
+
+rm(asignacion, data, summary_strata, variables)
+
+# Realizamos un undersampling para reducir las observaciones de la clase mas comun. Esto mediante un muestreo
+# estratificado. Las ventajas de este metodo sobre el oversampling es que no generas info sintentica.
+
+asignacion <- treatment_assign(training_set%>%filter(churn==0),
+                               share_control = 0.4055,
+                               n_t = 1,
+                               strata_varlist = c("churn"),
+                               seed = 1994,
+                               key="customer")
+
+list2env(asignacion, envir = .GlobalEnv)
+
+## Juntamos la asignacion con el training set
+training_set <- left_join(training_set%>%select(-treat),
+                         data%>%ungroup()%>%select(customer,treat),
+                         by="customer")
+
+training_set <- training_set%>%
+  filter(treat==0 | is.na(treat))%>%
+  select(-treat)
+
+rm(asignacion, data, summary_strata, variables)
+
+
+prop.table(table(training_set$churn))
+table(training_set$churn)
+```
+
+
+## Model estimation
+
+Pondremos a competir 3 modelos: 
+
+1. Cross-Validated LASSO-logit
+
+2. Prune Trees
+
+3. Random Forest
+
+### 4 (2 pts). Estima un cross validated LASSO. Muestra el la grafica de CV Binomial Deviance vs Complejidad
+
+Vamos a estimar un Lasso Logit utilizando cross validation. Cabe destacar que las ventajas de este modelo lineal es que es mucho mas facil poner en produccion e implementar. La calificacion para clientes nuevos (observaciones que no ha visto el modelo) consiste en suma ponderada de las Betas estimadas por las covariables.
+
+Para el CV es conveniente utilizar la libreria parallel, que permite que los nucleos de la computadora corran de manera parelela y no en un proceso secuencial. Esto reduce el tiempo de estimacion.
+
+Recordemos que el loglambda representa la transformacion logaritimica del parametro que penaliza la complejidad del modelo en el sentido de imponer un costo a cada variable estimada variable estimada
+
+
+```{r}
+library(parallel)
+
+Xs <- training_set %>%select(-c(customer,churn))
+Xs <- sparse.model.matrix(~.+0, data=Xs)
+
+# La sparse model matrix en lugar de guardar todos los registros 0 y 1, solo guarda las posiciones donde hay 1s
+# Entonces resume mucha info en una matriz mucho mas pequena. Podemos declara la formula que nosotros queremos
+# Sin intercepto: .+0
+# Interacciones con Variable: .+.*Variable 
+# Polinomios .^2
+
+y <- training_set$churn
+
+#Cluster for parallelization
+detectCores()
+cl <- makeCluster(8) 
+cl
+
+# Estimar CV Logit Lasso on 5 folds
+lasso_logit <- cv.gamlr(x=Xs, y=y, nfold=5, verb=T, cl = cl, family='binomial')
+
+# Cuando corremos algo de forma paralelizado la computadora se hace menos poderosa
+# entonces mejor volver a juntar los nucleos
+stopCluster(cl)
+
+save(lasso_logit, file = 'Modelos/lasso_logit.Rdata')
+plot(lasso_logit)
+
+rm(cl, Xs)
+```
+
+
+
+### 5. Grafica el Lasso de los coeficientes vs la complejidad del modelo.   
+```{r}
+plot(lasso_logit$gamlr)
+```
+
+```{r}
+coeficientes <- coef(lasso_logit)
+
+coeficientes <-tibble(variable=rownames(coeficientes),
+                      coeficiente = as.numeric(coeficientes))
+
+coeficientes <- coeficientes%>%
+  filter(coeficiente !=0)
+
+fwrite(coeficientes, file = "Bases output/coeficientes_lasso_logit.csv")
+```
+
+
+\newpage
+
+### 6 (2 pts). Cual es la $\lambda$ resultante? Genera una tabla con los coeficientes que selecciona el CV LASSO. Cuantas variables deja iguales a cero? Cuales son las 3 variables mas importantes para predecir el abandono? Da una explicacion intuitiva a la ultima pregunta
+```{r}
+lambda_min <- lasso_logit$lambda.min
+lambda_1se <- lasso_logit$lambda.1se
+```
+
+
+### 7. Genera un data frame (usando el validation set) que tenga: `customer`, `churn` y las predicciones del LASSO. 
+```{r}
+#Prediccion en Base de Validacion
+# Prediction Vectors
+load('Modelos/lasso_logit.Rdata')
+
+X_validation <- validation_set %>%select(-c(customer,churn,treat))
+X_validation <- sparse.model.matrix(~.+0, data=X_validation) 
+
+prediccion <- predict(lasso_logit$gamlr,
+                     X_validation,
+                     type='response',  
+                     select = lasso_logit$seg.min)
+
+#response es el score de probabilidad, la prediccion del Lasso
+#Que escoja el segmento minimo (donde se minimiza el error de pred fuera de la muesta)
+
+evaluacion <- bind_cols(validation_set%>%select(customer,churn), prediccion)
+colnames(evaluacion) <- c("customer","churn","pred")
+
+evaluacion <- evaluacion%>%
+  mutate(churn = as.factor(churn),
+         pred = as.numeric(pred))
+
+library(tidymodels) #Para la curva ROC
+library(ROCR)
+
+roc <- roc_curve(data = evaluacion%>%select(churn,pred), truth = churn, pred) 
+
+#truth es la columna donde esta la y observada, la otra entrada es para epecificar cual es la clase positiva.
+
+#Lo que te sale de esta funcion no es una curva, si no una tabla con la especificidad y sensibilidad resultantes para cada corte de probabilidad
+
+# Para graficar la curva ROC
+ggplot(roc, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ 
+  theme_bw()
+
+ggsave(height = 6, width = 6, filename = "Graficas/roc_lasso.png")
+
+# Para calcular el area debajo de la curva. 
+roc_auc(data = evaluacion, truth = churn, pred)
+
+rm(X_validation, coeficientes, lasso_logit, prediccion)
+```
+
+
+
+### 8. Estima ahora tree. Usa `mindev = 0.05, mincut = 1000` Cuantos nodos terminales salen? Muestra el summary del arbol
+El resultado es un arbol de un solo nodo terminal
+```{r}
+
+#Tenemos que convertir la variable objetivo en factor para que el modelo identifica que se trata de un problema de clasificacion
+training_set$churn <- factor(training_set$churn)
+
+# Para controlar por el greedyness, incluimos los filtros de n numero minimo de observaciones por nodo (mincut=1000) y un criterio de deviance minimo para realizar un split (mindev= 0.05)
+arbol <- tree(churn ~ .,
+              data = training_set%>%select(-customer),
+              control = tree.control(nrow(training_set),mincut = 1000,mindev = 0.05))
+
+# Se observa que el arbol no pudo realizar ningun split y se quedo en el nodo inicial 
+summary(arbol)
+
+
+# Generamos un arbol sin los criterios anteriores
+arbol <- tree(churn ~ .,data = training_set%>%select(-customer))
+
+summary(arbol)
+```
+
+
+### 9. Grafica el arbol resultante 
+```{r}
+plot(arbol)
+text(arbol, pretty = 0)
+```
+
+
+### 10. Poda el arbol usando CV. Muestra el resultado. Grafica Tree Size vs Binomial Deviance. Cual es el mejor tamanio del arbol? Mejora el Error?
+```{r}
+# Realizamos un tree-prunning mediante Cross Validation con 5 folds
+cv_tree<-cv.tree(arbol, K= 5)
+
+summary(cv_tree)
+
+plot(cv_tree$size, cv_tree$dev, type="b", xlab="size", ylab="deviance")
+```
+
+
+### 11. Grafica el arbol final. (Tip: Checa `prune.tree`)
+Observamos que los splits del arbol podado son iguales a los del arbol greedy y que ambos tienen el mismo número de nodos terminales. Esto sugiere que el modelo de clasificacion no sirve de mucho pues las metricas del modelo indican que los splits son espurios
+
+```{r}
+#Consideramos el parametro de cost complexity (alpha) obtenido del CV
+arbol_pruned<-prune.tree(arbol, best=2)
+
+save(arbol_pruned, file="Modelos/pruned_tree.RData")
+
+plot(arbol_pruned)
+text(arbol_pruned, pretty = 0)
+
+```
+
+
+
+### 12. Genera las predicciones del arbol pruned. Guardalas en la base de predicciones. Guarda el score y la prediccion categorica en la misma data frame donde guardaste las predicciones del LASSO
+
+Generamos la prediccion tipo class para obtener la clasificación estimada y también predicción en probabilidad.
+```{r}
+# Generamos las predicciones del modelo en la base de validacion
+prediccion_arbol <- predict(arbol_pruned, 
+                            newdata = validation_set%>%select(-c(customer,churn,treat)),
+                            type = "class")
+
+pred_tree <- bind_cols(validation_set%>%select(customer), prediccion_arbol)
+
+prediccion_arbol <- data.frame(predict(arbol_pruned, 
+                            newdata = validation_set%>%select(-c(customer,churn,treat)),
+                            type = "vector"))
+
+evaluacion <- bind_cols(pred_tree,prediccion_arbol%>%select(X1),evaluacion)
+
+colnames(evaluacion) <- c("customer", "pred_tree", "pred_prob_tree", "churn", "pred_prob_lasso")
+
+evaluacion <- evaluacion%>%
+  select(customer,churn,pred_prob_lasso,pred_prob_tree,pred_tree)
+
+rm(prediccion_arbol,pred_tree,arbol, arbol_pruned)
+
+```
+
+
+### 13 (4pts). Corre un Random Forest ahora. Cual es la $B$ para la que ya no ganamos mucho mas en poder predictivo?
+
+- Corre para `num.trees=100,200,300, 500, 700, 800`
+
+- En cada caso, guarda unicamente el `prediction.error`
+
+```{r}
+detectCores()
+cl<-makeCluster(8)
+cl
+
+# Estimation
+errores <- map_dbl(c(100,200,300,500,700,800),
+                   function(x) ranger(churn~., data = training_set%>%select(-customer),
+                      classification = T,
+                      num.trees = x,
+                      importance = "impurity",
+                      verbose = T)$prediction.error)
+
+errores <- tibble( Num_trees = c(100,200,300,500,700,800),
+                   pred_error = errores)
+
+
+ggplot(errores, aes(x=Num_trees, y=pred_error))+
+  geom_path()+ 
+  theme_bw()+
+  labs(y = "Test Classification Error",x = "Number of Trees")+
+  theme(axis.title.y = element_text(size = 12),axis.title.x = element_text(size = 12),
+        axis.text.y=element_text(size=11),axis.text.x=element_text(size=11),
+        legend.text = element_text(size = 11))+ 
+  scale_x_continuous(labels = comma,limits = c(100,800),breaks=seq(100,800,100))+
+  ggsave(height = 6, width = 6, filename = "Graficas/rf_number_trees.png")
+
+
+```
+
+
+### 14. Escoge un random forest para hacer las predicciones. Grafica la importancia de las variables. Interpreta 
+
+```{r}
+# De acuerdo a los resultados previos, estimamos un random forest con 500 arboles
+t0<-Sys.time()
+
+random_forest <- ranger(churn~., 
+                        data = training_set%>%select(-customer),
+                        classification = T,
+                        num.trees = 500,
+                        importance = "impurity",
+                        verbose = T)
+
+Sys.time() -t0
+
+save(random_forest, file = 'Modelos/random_forest.Rdata')
+
+stopCluster(cl)
+
+# Generamos un data frame con la importancia de las variables
+var_importance <- data.frame(importance(random_forest))
+var_importance <- bind_cols(variable = rownames(var_importance),var_importance)
+rownames(var_importance) <- 1:nrow(var_importance)
+
+```
+
+
+
+### 15. Genera las predicciones OOS para el random forest. Guardalas en la misma data.frame que los otros modelos 
+
+```{r}
+# Generamos las predicciones puntuales del modelo
+prediccion_forest <- predict(random_forest,
+                             data = validation_set%>%select(-c(customer,treat,churn)),
+                             type = "response")
+
+pred_forest <- prediccion_forest$predictions
+
+```
+
+
+### 16 (2pts). Corre el mismo forest pero ahora con `probability = T`. Esto generaria predicciones numericas en lugar de categoricas. Genera las predicciones continuas y guardalas en el mismo data frame
+```{r}
+t0<-Sys.time()
+
+random_forest_prob <- ranger(churn~., 
+                        data = training_set%>%select(-customer),
+                        num.trees = 500,
+                        importance = "impurity",
+                        probability = T,
+                        verbose = T)
+
+Sys.time() -t0
+
+save(random_forest_prob, file = 'Modelos/random_forest_prob.Rdata')
+
+# Generamos las predicciones puntuales del modelo
+prediccion_forest_prob <- predict(random_forest_prob,
+                             data = validation_set%>%select(-c(customer,treat,churn)),
+                             type = "response")
+
+pred_forest_prob <- data.frame(prediccion_forest_prob$predictions)
+
+# Pegamos las predicciones del forest a las estimaciones de los demás modelos
+evaluacion <- bind_cols(evaluacion, pred_forest, pred_forest_prob%>%select(X1))
+
+evaluacion <- evaluacion%>%
+  rename(pred_forest = "...6",
+         pred_prob_forest = "X1")
+
+rm()
+```
+
+
+### 17 (4 pts). Genera graficas de las curvas ROC para los tres modelos. Cual parece ser mejor?
+
+```{r}
+roc_lasso <- roc_curve(data = evaluacion%>%select(churn,pred_prob_lasso)%>%rename(pred=pred_prob_lasso),
+                       truth = churn, pred) 
+
+roc_tree <- roc_curve(data = evaluacion%>%select(churn,pred_prob_tree)%>%rename(pred=pred_prob_tree), 
+                      truth = churn, pred) 
+
+roc_rf <- roc_curve(data = evaluacion%>%select(churn, pred_prob_forest)%>%rename(pred=pred_prob_forest),
+                    truth = churn, pred) 
+
+# Para graficar la curva ROC del LASSO
+ggplot(roc_lasso, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ 
+  theme_bw()
+
+# Grafica curva ROC del arbol podado
+ggplot(roc_tree, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ 
+  theme_bw()
+
+# Grafica curva ROC del arbol podado
+ggplot(roc_rf, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ 
+  theme_bw()
+
+```
+
+
+### 18. Genera una tabla con el AUC ROC. Cual es el mejor modelo ? 
+
+```{r}
+
+auc_lasso <- roc_auc(data = evaluacion%>%select(churn,pred_prob_lasso)%>%rename(pred=pred_prob_lasso),
+                     truth = churn, pred)
+
+auc_tree <- roc_auc(data = evaluacion%>%select(churn,pred_prob_tree)%>%rename(pred=pred_prob_tree),
+                    truth = churn, pred)
+
+auc_rf <- roc_auc(data = evaluacion%>%select(churn, pred_prob_forest)%>%rename(pred=pred_prob_forest),
+                  truth = churn, pred)
+
+auc_lasso
+auc_tree
+auc_rf
+```
+
+
+### 19 (2pts). Escoge un punto de corte para generar predicciones categoricas para el LASSO basado en la Curva ROC. Genera las matrices de confusion para cada modelo. Comparalas. Que tipo de error es mas pernicioso? 
+
+Queremos que nuestro modelo sea mas sensible que especifico debido a que es mas importante controlar los falsos negativos (error del tipo 2), que los falsos positivos (error del tipo 1). Esto debido a que el costo de clasificar mal a un cliente que va a abandonar el producto, posiblemente sea mayor a implementar esfuerzos de retencion sobre aquellos que el modelo predice abandonaran pero no lo hacen.
+
+```{r}
+# Supongamos que nos preocupan mas los falsos negativos y por este motivo fijamos un corte de probabilidad del 40% para determinar que un cliente abandonara el producto
+
+p_star <- 0.40
+
+# Generamos las predicciones de abandono con base en el corte de probabilidad
+abandono <- evaluacion%>%
+  mutate(abandono_lasso = factor(if_else(pred_prob_lasso>=p_star,1,0)),
+         abandono_tree = factor(if_else(pred_prob_tree>=p_star,1,0)),
+         abandono_rf = factor(if_else(pred_prob_forest>=p_star,1,0)))%>%
+  select(churn, abandono_lasso, abandono_tree, abandono_rf, pred_prob_lasso, 
+         pred_prob_tree,pred_prob_forest)
+
+
+# Generamos las matrices de confusion
+
+confusion_mat_lasso <- data.frame(conf_mat(abandono%>%select(churn, abandono_lasso), churn, abandono_lasso)$table)
+confusion_mat_tree <- data.frame(conf_mat(abandono%>%select(churn, abandono_tree), churn, abandono_tree)$table)
+confusion_mat_rf <- data.frame(conf_mat(abandono%>%select(churn, abandono_rf), churn, abandono_rf)$table)
+
+
+```
+
+
+### 20 (2pts). Finalmente, construye una lift table. Esto es, para 20 grupos del score predecido, genera 1) El promedio de las predicciones, 2) el promedio del churn observado. Existe monotonia? El mejor algoritmo es monotonico? (Tip: usa `ntile` para generar los grupos a partir de las predicciones)
+
+```{r}
+# Modelo LASSO Logit
+#  Generamos 20 grupos de clientes de acuerdo a su score de abandono predecido y calculamos el promedio de las probabilidades de abandono por cuantil. 
+
+lift_table_lasso <- abandono%>%select(churn, pred_prob_lasso, abandono_lasso)%>%
+  mutate_at(c("churn","pred_prob_lasso","abandono_lasso"), ~as.numeric(.))%>%
+  mutate(score = as.integer(ntile(pred_prob_lasso, n=20)),
+         churn = case_when(churn==1~0,
+                           churn==2~1),
+         abandono_lasso = case_when(abandono_lasso==1~0,
+                                    abandono_lasso==2~1))%>%
+  group_by(score)%>%
+  summarise(observado = mean(churn)*100,
+            prediccion = mean(abandono_lasso)*100)%>%
+  pivot_longer(cols = c(observado,prediccion))
+
+# Grafica
+ggplot(lift_table_lasso, aes(x=score, y=value, fill=name))+
+  geom_point(shape=21, size=2)+
+  geom_path()+
+  labs(title = "Modelo LASSO Logit",
+       x="Cuantil de Probabilidad de Abandono (20 Grupos)",
+       y = "Porcentaje")+
+  theme_bw()+
+  theme(axis.text = element_text(size=12), text = element_text(size=12), legend.position = "bottom")+
+  ggsave(height = 6, width = 6, filename = "Graficas/lift_table_lasso.png")
+  
+```
+
+```{r}
+
+# Modelo - Pruned Tree 
+
+lift_table_tree <- abandono%>%select(churn, pred_prob_tree, abandono_tree)%>%
+  mutate_at(c("churn","pred_prob_tree","abandono_tree"), ~as.numeric(.))%>%
+  mutate(score = as.integer(ntile(pred_prob_tree, n=20)),
+         churn = case_when(churn==1~0,
+                           churn==2~1),
+         abandono_tree = case_when(abandono_tree==1~0,
+                                    abandono_tree==2~1))%>%
+  group_by(score)%>%
+  summarise(observado = mean(churn)*100,
+            prediccion = mean(abandono_tree)*100)%>%
+  pivot_longer(cols = c(observado,prediccion))
+
+# Grafica
+ggplot(lift_table_tree, aes(x=score, y=value, fill=name))+
+  geom_point(shape=21, size=2)+
+  geom_path()+
+  labs(title = "Modelo Pruned Tree",
+       x="Cuantil de Probabilidad de Abandono (20 Grupos)",
+       y = "Porcentaje")+
+  theme_bw()+
+  theme(axis.text = element_text(size=12), text = element_text(size=12), legend.position = "bottom")+
+  ggsave(height = 6, width = 6, filename = "Graficas/lift_table_tree.png")
+```
+
+
+```{r}
+#Modelo Random Forest
+
+lift_table_rf <- abandono%>%select(churn, pred_prob_forest, abandono_rf)%>%
+  mutate_at(c("churn","pred_prob_forest","abandono_rf"), ~as.numeric(.))%>%
+  mutate(score = as.integer(ntile(pred_prob_forest, n=20)),
+         churn = case_when(churn==1~0,
+                           churn==2~1),
+         abandono_rf = case_when(abandono_rf==1~0,
+                                    abandono_rf==2~1))%>%
+  group_by(score)%>%
+  summarise(observado = mean(churn)*100,
+            prediccion = mean(abandono_rf)*100)%>%
+  pivot_longer(cols = c(observado,prediccion))
+
+# Grafica
+ggplot(lift_table_rf, aes(x=score, y=value, fill=name))+
+  geom_point(shape=21, size=2)+
+  geom_path()+
+  labs(title = "Modelo Random Forest",
+       x="Cuantil de Probabilidad de Abandono (20 Grupos)",
+       y = "Porcentaje")+
+  theme_bw()+
+  theme(axis.text = element_text(size=12), text = element_text(size=12), legend.position = "bottom")+
+  ggsave(height = 6, width = 6, filename = "Graficas/lift_table_rf.png")
+```
+
+
+### 21. Concluye. Que estrategia harias con este modelo? Como generarias valor a partir de el?
+
+Se puede pensar en adaptar una estrategia de retencion enfocada hacia los clientes clasificados como propensos a abandonar. Dado que algunas de las variables relevantes fueron el numero de dias que llevaban con el equipo (>360 dias eran propensos a abandonar) se puede pensar en ofrecerles alguna promocion para renovar su equipo de celular. Adicionamente, una de las variables que ayuda a determinar el abandono fue si el cliente experimento una reparacion de celular, por lo que puede pensarse en buscar renovar los equipos dañados. 
