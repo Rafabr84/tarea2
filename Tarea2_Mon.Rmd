@@ -299,13 +299,57 @@ summary(arbol_clasificacion)
 No se puede graficar, ya que solo tiene un nodo.
 
 
+
 ### 10. Poda el árbol usando CV. Muestra el resultado. Grafica Tree Size vs Binomial Deviance. Cuál es el mejor tamaño del árbol? Mejora el Error?
 
+```{r CV tree}
+train_un <- train_un %>% select(-customer)
+#Vulevo a hacer el árbol normal sin tomar mindev y mincut para que me salga >1 nodo
+arbol2 <- tree(churn ~. , data = train_un)
+
+set.seed(3)
+cv_arbol <- cv.tree(arbol2, FUN = prune.tree, K = 5)
+
+plot(cv_arbol$size, cv_arbol$dev , type = "b",
+     xlab = "Tree Size", ylab = "CV Misclassification Rate")
+
+# No. nodos óptimos
+paste("Un árbol con:", cv_arbol$size[which.min(cv_arbol$dev)], "nodos terminales minimiza el test error.")
+
+```
+Un árbol con 2 nodos terminales minimiza el test error.
 
 ### 11. Gráfica el árbol final. (Tip: Checa `prune.tree`)
 
+```{r Pruned tree}
+
+# Árbol podado 
+arbol_pruning <- prune.tree(tree = arbol2, best = 2)
+
+plot(x = arbol_pruning, type = "proportional")
+text(x = arbol_pruning, splits = TRUE, pretty = 0,
+     cex = 0.8, col = "purple")
+title(main = "Pruned Tree")
+
+```
+
 
 ### 12. Genera las predicciones del árbol pruned. Guardalas en la base de predicciones. Guarda el score y la prediccion categorica en la misma data frame donde guardaste las predicciones del LASSO
+
+```{r 12. Predic pruned tree}
+
+# Prediccion 
+y_pred_pruned <- predict(arbol_pruning, newdata = testx,
+                        type = "vector")
+
+# Matriz de confusión
+  table(predicted = y_pred_pruned, actual = test$churn)
+
+#Guardamos prediccion del arbol junto a la del LASSO
+predicciones <- eval %>% select(customer, churn, y_pred) %>%
+                         rename(Y_lasso = y_pred) %>%
+                         mutate(Y_prunedtree = as.numeric(y_pred_pruned))
+```
 
 
 
@@ -315,32 +359,92 @@ No se puede graficar, ya que solo tiene un nodo.
 
 - En cada caso, guarda únicamente el `prediction.error`
 
+```{r Random forest}
+
+library(ranger) #Más rápido que randomForest
+
+detectCores()
+cl<-makeCluster(12)
+cl
+
+# Estimation
+a<-Sys.time()
+
+rf_100 <-ranger(churn~., data = train_un, classification = T, num.trees = 100)
+rf_200 <-ranger(churn~., data = train_un, classification = T, num.trees = 200)
+rf_300 <-ranger(churn~., data = train_un, classification = T, num.trees = 300)
+rf_500 <-ranger(churn~., data = train_un, classification = T, num.trees = 500)
+rf_700 <-ranger(churn~., data = train_un, classification = T, num.trees = 700)
+rf_800 <-ranger(churn~., data = train_un, classification = T, num.trees = 800, 
+                importance = 'impurity_corrected')
+
+Sys.time()-a
+#save(rf, file ='rf_100.Rdata')
+stopCluster(cl)
+
+# Guardar prediction error del OOB
+MSE_100 <- rf_100$prediction.error
+MSE_200 <- rf_200$prediction.error
+MSE_300 <- rf_300$prediction.error
+MSE_500 <- rf_500$prediction.error
+MSE_700 <- rf_700$prediction.error
+MSE_800 <- rf_800$prediction.error
+ 
+MSE <- as.data.frame(cbind(rf_100$prediction.error, rf_200$prediction.error, rf_300$prediction.error,
+               rf_500$prediction.error, rf_700$prediction.error, rf_800$prediction.error ))
+
+No.Tree <- cbind(100,200,300,500,700,800)
+MSE_RF <- t(as.data.frame(rbind(No.Tree, MSE)))
+
+kable(MSE_RF,
+      col.names = c("No.Tree", "MSE"), 
+      caption = "Prediction error" ) 
+```
 
 ### 14. Escoge un random forest para hacer las predicciones. Grafica la importancia de las variables. Interpreta 
 
+```{r Predic RF e importancia var}
+#Escogemos el random forest con 800 árboles
+
+#Most important variables
+important_var <- as.data.frame(importance_pvalues(rf_800)) %>%
+  filter(pvalue < 0.01) %>%
+  arrange(desc(importance))
+
+kable(important_var,
+      caption = "Most important variables (pvalue<0.01)")
+ 
+```
 
 
 ### 15. Genera las predicciones OOS para el random forest. Guardalas en la misma data.frame que los otros modelos 
 
+```{r Predic OOS}
+#Por efectos prácticos selecciono el RF con 700 árboles
+
+# Out of Bag:  
+oob <- rf_700$predictions
+# Prediction vectors:  
+pred_val<-predict(rf_700, data = validation)$predictions
+
+#Guardamos prediccion del random forest junto al resto 
+predicciones <- predicciones %>% 
+                         mutate(Y_randomfor = as.numeric(pred_val))
+
+```
 
 
 ### 16 (2pts). Corre el mismo forest pero ahora con `probability = T`. Esto generará predicciones númericas en lugar de categóricas. Genera las predicciones continuas y guardalas en el mismo data frame
 
+```{r Predict RF numérico}
+rf_700_cont <-ranger(churn~., data = train_un, probability = T, num.trees = 700)
 
-### 17 (4 pts). Genera graficas de las curvas ROC para los tres modelos. Cual parece ser mejor?
+# Prediction vectors:  
+pred_val1<-predict(rf_700_cont, data = validation)$predictions
 
+#Guardamos prediccion del random forest junto al resto 
+predicciones <- predicciones %>% 
+                         mutate(Y_randomfor_prob0 = as.numeric(pred_val1[,1]),
+                                Y_randomfor_prob1 = as.numeric(pred_val1[,2]))
 
-
-### 18. Genera una tabla con el AUC ROC. Cuál es el mejor modelo ? 
-
-
-### 19 (2pts). Escoge un punto de corte para generar predicciones categoricas para el LASSO basado en la Curva ROC. Genera las matrices de confusión para cada modelo. Compáralas. Qué tipo de error es mas pernicioso? 
-
-
-### 20 (2pts). Finalmente, construye una lift table. Esto es, para 20 grupos del score predecido, genera 1) El promedio de las predicciones, 2) el promedio del churn observado. Existe monotonía? El mejor algoritmo es monotónico? (Tip: usa `ntile` para generar los grupos a partir de las predicciones)
-
-
-
-### 21. Concluye. Que estrategia harías con este modelo? Cómo generarías valor a partir de el?
-
-
+```
