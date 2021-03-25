@@ -336,7 +336,6 @@ Por último, la variable 'refurb' se refiere a la renovación del equipo, por lo
 ```{r 7.LASSO predic}
 #Prediccion en Base de Validacion
 # Prediction Vectors
-
 prediccion_1 <- drop(predict(lasso_logit$gamlr, Xs,
                       type='response',
                       select = lasso_logit$seg.min))
@@ -475,7 +474,7 @@ y_pred_pruned <- predict(arbol_pruning, newdata = test,
 # Matriz de confusión
 table(predicted = y_pred_pruned, actual = test$churn)
 #Guardamos prediccion del arbol junto a la del LASSO
-#####################################################################################################CHECK THIS
+
 predicciones <- eval %>% select(customer, churn, y_pred_pruned) %>%
                          rename(Y_lasso = y_pred_pruned) %>%
                          mutate(Y_prunedtree = as.numeric(y_pred_pruned))
@@ -573,32 +572,8 @@ validation_set <- bind_cols(validation_set, pred_forest, pred_forest_prob%>%sele
 ### 17 (4 pts). Genera graficas de las curvas ROC para los tres modelos. Cual parece ser mejor?
 
 ```{r 17. Curvas ROC}
-#CARLOS
-roc_lasso <- roc_curve(data = validation_set%>%select(churn,pred_prob_lasso)%>%rename(pred=pred_prob_lasso),
-                       truth = churn, pred) 
-roc_tree <- roc_curve(data = validation_set%>%select(churn,pred_prob_tree)%>%rename(pred=pred_prob_tree), 
-                      truth = churn, pred) 
-roc_rf <- roc_curve(data = validation_set%>%select(churn, pred_prob_forest)%>%rename(pred=pred_prob_forest),
-                    truth = churn, pred) 
-# Para graficar la curva ROC del LASSO
-ggplot(roc_lasso, aes(x=specificity, y=sensitivity))+
-  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
-  geom_path()+ 
-  theme_bw()
-# Grafica curva ROC del arbol podado
-ggplot(roc_tree, aes(x=specificity, y=sensitivity))+
-  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
-  geom_path()+ 
-  theme_bw()
-# Grafica curva ROC del arbol podado
-ggplot(roc_rf, aes(x=specificity, y=sensitivity))+
-  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
-  geom_path()+ 
-  theme_bw()
-
-#MON
 #Curvas ROC para LASSO, Tree y Random Forest 
-roc_lasso <- roc_curve(data=validation_set, truth = churn, Y_lasso)
+roc_lasso <- roc_curve(data=predicciones, truth = churn, Y_lasso)
 roc_pruned <- roc_curve(data=predicciones, truth = churn, Y_prunedtree)
 roc_rf <- roc_curve(data=predicciones, truth = churn, Y_randomfor_prob1)
 g1 <- ggplot(roc_lasso,aes(x = specificity, y = sensitivity))+geom_abline(slope = -1, intercept = 1, linetype ='dashed')+geom_path(col = "plum3")+theme_bw()+
