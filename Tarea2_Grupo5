@@ -31,6 +31,7 @@ library(parallel)
 library(ROCR)
 library(yardstick)
 library(ggplot2)
+library("gridExtra")
 ```
 
 
@@ -74,7 +75,7 @@ load('Cell2Cell.Rdata')
 
 Hay muy pocos missing values, vamos a eliminarlos todos.
 
-```{r missing values, echo=TRUE}
+```{r 1.Missing values}
 faltantes <- map_dbl(cell2cell%>%select_all, function(x) 100*sum(is.na(x))/nrow(cell2cell))
 faltantes <- data.frame(faltantes[faltantes>0])
 
@@ -196,7 +197,7 @@ Se propone quitar los valores negativos de la base.
 Conviene hacer undersampling, ya que los datos del estudio de interés son la mitad de los que tenemos en el otro grupo.
 Por lo tanto creo será mejor así. Además evitamos generar variables sintéticas.
 
-```{r}
+```{r 2.Distr 'churn'}
 #Obtengo los datos para hacer mi tabla de frecuencias -
 valores <- c(0,1)
 freq_abs <- summary(as.factor(cell2cell$churn))
@@ -216,7 +217,7 @@ knitr::kable(freq.tab,
 Vamos a hacer el Undersampling. Para esto sólo necesitamos utilizar la librería sample incluida en R.
 Esto nos permite tomar muestras aleatorias, unicamente hay que decirle de que tamaño, en este caso serán del grupo más chico (los que se abandonaron o churn=1).
 
-```{r}
+```{r 3.Split sample}
 # Vamos a hacer una distribucion 80 - 20 entre el training y validation set
 # Generamos una variable de cuartiles de revenue para considerar como estrato en la division de la base
 cell2cell <- cell2cell%>%
@@ -281,7 +282,7 @@ Pondremos a competir 3 modelos:
 Vamos a realizar el CV LASSO-logit para el set de entrenamiento partido normal y el partido undersampling.
 Eso nos permitirá ver la diferencia en los estimadores si no consideramos esto.
 
-```{r}
+```{r 4. CV LASSO}
 Xs <- training_set %>%select(-c(customer,churn))
 Xs <- sparse.model.matrix(~.+0, data=Xs)
 # La sparse model matrix en lugar de guardar todos los registros 0 y 1, solo guarda las posiciones donde hay 1s
@@ -312,7 +313,7 @@ rm(cl, Xs)
 
 ### 5. Grafica el Lasso de los coeficientes vs la complejidad del modelo.   
 
-```{r}
+```{r 5.LASSO coef-complex}
 plot(lasso_logit)
 plot(lasso_logit$gamlr)
 ```
@@ -331,7 +332,7 @@ Las 3 variables, sin contar el intercepto, con mayor importancia son: retcall, c
 
 A priori, podríamos pensar que los clientes que marcaron al equipo de retencion buscan alguna promoción para no irse y al no conseguiirla abandonan, adicionalmente aquellos que tienen un mayor riesgo crediticio aa disminuye la probabilidad de irse. Por último aquellos que tienen equipos revendidos pueden ser más suceptibles a abandonar debido a que sus equipos son más baratos y por lo tanto de menor calidad, provocando que su servicio sea malo y por último se vayan antes.
 
-```{r}
+```{r 6.Coefs CV LASSO}
 
 lambda_min_under <- (lasso_under$lambda.min) 
 lambda_1std_under <-(lasso_under$lambda.1se) 
@@ -383,7 +384,7 @@ Por último, la variable 'refurb' se refiere a la renovación del equipo, por lo
 
 ### 7. Genera un data frame (usando el validation set) que tenga: `customer`, `churn` y las predicciones del LASSO. 
 
-```{r pred y roc logit cv lasso}
+```{r 7.LASSO predic}
 
 #########################################################################   MONTSE
 eval <- validation %>%
@@ -471,108 +472,91 @@ cat("El AUC del modelo de lambda minima es: ",AUC_1$.estimate,"\n",
 
 ### 8. Estima ahora tree. Usa `mindev = 0.05, mincut = 1000` Cuántos nodos terminales salen? Muestra el summary del árbol
 
-```{r arbol}
-
-dfarbol <- cbind(train_y_under, train_under)
-detectCores()
-cl<-makeCluster(4)
-cl
-arbol <- tree(train_y_under ~. , data = dfarbol, mincut = 1000, mindev = 0.05)
-
-stopCluster(cl)
-save(arbol, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/arbol.Rdata")
-
-summary(arbol)
-
+```{r 8.Tree}
+# Separo mi muestra en train y test sets.
+set.seed(100)
+train <- sample(1:nrow(cell2cell), size = nrow(cell2cell)*4/5)
+test <- cell2cell[-train,]
+# Tree
+arbol_clasificacion <- tree(formula = churn ~ ., data = cell2cell, subset = train,
+                            control = tree.control(nobs= length(train), 
+                                                   mincut = 1000,  mindev = 0.05))
+save(arbol_clasificacion, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/arbol.Rdata")
+summary(arbol_clasificacion)
 ```
 
 
 ### 9. Grafica el árbol resultante 
 
-```{r grafica arbol}
+No se puede graficar, ya que solo tiene un nodo.
 
-plot(arbol$weights)
-
+```{r 9. Tree chart}
+plot(arbol_clasificacion); text(arbol_clasificacion, pretty = 0)
+plot(arbol_clasificacion$weights)
 ```
 
 
 ### 10. Poda el árbol usando CV. Muestra el resultado. Grafica Tree Size vs Binomial Deviance. Cuál es el mejor tamaño del árbol? Mejora el Error?
 
 
-```{r}
+```{r 10. CV tree}
+data = cell2cell
+set.seed(101) # Set Seed so that same sample can be reproduced in future also
+sample <- sample.int(n = nrow(data), size = floor(.80*nrow(data)), replace = F)
+train <- data[sample, ]
+test  <- data[-sample, ]
+validation = test
+#--------------------------------------------------------------------------------
+# Undersampling in training set 
+library(ROSE)
+# imbalance on training set
+table(train$churn)
+# balanced data set with under-sampling
+train_un <- ovun.sample(churn~., data=train,
+                                  p=0.5, seed=1, 
+                                  method="under")$data
 
 
-detectCores()
-cl<-makeCluster(4)
-arbol_2 <- tree(train_y_under ~. , data = dfarbol)
-
-cv_arbol<-cv.tree(arbol_2, K= 10)
-stopCluster(cl)
-
-save(arbol_2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/a-rbol2.Rdata")
-save(cv_arbol, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/cv_arbol.Rdata")
-
-
-summary(arbol_2)
-summary(cv_arbol)
+train_un <- train_un %>% select(-customer)
+#Vulevo a hacer el árbol normal sin tomar mindev y mincut para que me salga >1 nodo
+arbol2 <- tree(churn ~. , data = train_un)
+set.seed(3)
+cv_arbol <- cv.tree(arbol2, FUN = prune.tree, K = 5)
+plot(cv_arbol$size, cv_arbol$dev , type = "b",
+     xlab = "Tree Size", ylab = "CV Misclassification Rate")
+# No. nodos óptimos
+paste("Un árbol con:", cv_arbol$size[which.min(cv_arbol$dev)], "nodos terminales minimiza el test error.")
 
 ```
 
+Un árbol con 2 nodos terminales minimiza el test error.
 
 
 ### 11. Gráfica el árbol final. (Tip: Checa `prune.tree`)
 
-```{r}
-
-pr_arbol <- prune.tree(arbol_2, best = 2)
-plot(pr_arbol); text(pr_arbol)
-summary(pr_arbol)
-
-
+```{r 11. Pruned tree}
+arbol_pruning <- prune.tree(tree = arbol2, best = 2)
+plot(x = arbol_pruning, type = "proportional")
+text(x = arbol_pruning, splits = TRUE, pretty = 0,
+     cex = 0.8, col = "purple")
+title(main = "Pruned Tree")
 ```
 
 
 
 ### 12. Genera las predicciones del árbol pruned. Guardalas en la base de predicciones. Guarda el score y la prediccion categorica en la misma data frame donde guardaste las predicciones del LASSO
 
-```{r}
-prediccion_pr <- predict(pr_arbol, dfarbol, type='vector')
-plot(prediccion_pr,dfarbol); text(prediccion_pr)
-
-
-
-drop(prediccion_pr)
-
-eval_2 <- bind_cols(test_y_under, prediccion_2)
-colnames(eval_2) <- cbind("obs","pred_2")
-eval_2$obs <- as.factor(eval_2$obs)
-
+```{r 12. Predic pruned tree}
+#MON
 # Prediccion 
 y_pred_pruned <- predict(arbol_pruning, newdata = testx,
                         type = "vector")
 # Matriz de confusión
-  table(predicted = y_pred_pruned, actual = test$churn)
+table(predicted = y_pred_pruned, actual = test$churn)
 #Guardamos prediccion del arbol junto a la del LASSO
 predicciones <- eval %>% select(customer, churn, y_pred) %>%
                          rename(Y_lasso = y_pred) %>%
                          mutate(Y_prunedtree = as.numeric(y_pred_pruned))
-
-
-
-# Generamos las predicciones del modelo en la base de validacion
-prediccion_arbol <- predict(pr_arbol, 
-                            newdata = validation_set%>%select(-c(customer,churn,treat)),
-                            type = "vector")
-pred_tree <- bind_cols(validation_set%>%select(customer), prediccion_arbol)
-prediccion_arbol <- data.frame(predict(pr_arbol, 
-                            newdata = validation_set%>%select(-c(customer,churn,treat)),
-                            type = "vector"))
-evaluacion <- bind_cols(pred_tree,prediccion_arbol%>%select(X1),evaluacion)
-colnames(evaluacion) <- c("customer", "pred_tree", "pred_prob_tree", "churn", "pred_prob_lasso")
-evaluacion <- evaluacion%>%
-  select(customer,churn,pred_prob_lasso,pred_prob_tree,pred_tree)
-rm(prediccion_arbol,pred_tree,arbol, arbol_pruned)
-
 ```
 
 
@@ -583,218 +567,61 @@ rm(prediccion_arbol,pred_tree,arbol, arbol_pruned)
 
 - En cada caso, guarda únicamente el `prediction.error`
 
-```{r con p}
-p <- ncol(train_under)
-p
-p2 <- p/2
-p2
-m <- sqrt(p)
-m <- round(m, digits = 0)
-m
-num_arb <- c(100, 200, 300, 500, 700, 800)
-B <- c(p, p2, m)
-
+```{r 13. Random forest}
 detectCores()
-cl<-makeCluster(4)
+cl<-makeCluster(8)
 cl
-inicio <- Sys.time()
-
-a_100_p<-Sys.time()
-rf_100_p<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 100, mtry = p)
-a_100_p <- Sys.time()-a_100_p
-
-a_200_p<-Sys.time()
-rf_200_p<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 200, mtry = p)
-a_200_p <- Sys.time()-a_200_p
-
-a_300_p<-Sys.time()
-rf_300_p<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 300, mtry = p)
-a_300_p <- Sys.time()-a_300_p
-
-a_500_p<-Sys.time()
-rf_500_p<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 500, mtry = p)
-a_500_p <- Sys.time()-a_500_p
-
-a_700_p<-Sys.time()
-rf_700_p <-ranger(train_y_under~., data = train_under, classification = T, num.trees = 700, mtry = p)
-a_700_p <- Sys.time()-a_700_p
-
-a_800_p<-Sys.time()
-rf_800_p<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 800, mtry = p)
-a_800_p <- Sys.time()-a_800_p
+# Estimation
+errores <- map_dbl(c(100,200,300,500,700,800),
+                   function(x) ranger(churn~., data = training_set%>%select(-customer),
+                      classification = T,
+                      num.trees = x,
+                      importance = "impurity",
+                      verbose = T)$prediction.error)
+errores <- tibble( Num_trees = c(100,200,300,500,700,800),
+                   pred_error = errores)
+ggplot(errores, aes(x=Num_trees, y=pred_error))+
+  geom_path()+ 
+  theme_bw()+
+  labs(y = "Test Classification Error",x = "Number of Trees")+
+  theme(axis.title.y = element_text(size = 12),axis.title.x = element_text(size = 12),
+        axis.text.y=element_text(size=11),axis.text.x=element_text(size=11),
+        legend.text = element_text(size = 11))+ 
+  scale_x_continuous(labels = comma,limits = c(100,800),breaks=seq(100,800,100))+
+  ggsave(height = 6, width = 6, filename = "Graficas/rf_number_trees.png")
 
 
-a_100_m<-Sys.time()
-rf_100_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 100, mtry = m)
-a_100_m <- Sys.time()-a_100_m
-
-a_200_m<-Sys.time()
-rf_200_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 200, mtry = m)
-a_200_m <- Sys.time()-a_200_m
-
-a_300_m<-Sys.time()
-rf_300_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 300, mtry = m)
-a_300_m <- Sys.time()-a_300_m
-
-a_500_m<-Sys.time()
-rf_500_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 500, mtry = m)
-a_500_m <- Sys.time()-a_500_m
-
-a_700_m<-Sys.time()
-rf_700_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 700, mtry = m)
-a_700_m <- Sys.time()-a_700_m
-
-a_800_m<-Sys.time()
-rf_800_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 800, mtry = m)
-a_800_m <- Sys.time()-a_800_m
-
-
-a_100_p2<-Sys.time()
-rf_100_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 100, mtry = p2)
-a_100_p2 <- Sys.time()-a_100_p2
-
-a_200_p2<-Sys.time()
-rf_200_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 200, mtry = p2)
-a_200_p2 <- Sys.time()-a_200_p2
-
-a_300_p2<-Sys.time()
-rf_300_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 300, mtry = p2)
-a_300_p2 <- Sys.time()-a_300_p2
-
-a_500_p2<-Sys.time()
-rf_500_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 500, mtry = p2)
-a_500_p2 <- Sys.time()-a_500_p2
-
-a_700_p2<-Sys.time()
-rf_700_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 700, mtry = p2)
-a_700_p2 <- Sys.time()-a_700_p2
-
-a_800_p2<-Sys.time()
-rf_800_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 800, mtry = p2)
-a_800_p2 <- Sys.time()-a_800_p2
-
-fin <- Sys.time()-inicio
-
+#MONTSE BACKUP
+detectCores()
+cl<-makeCluster(8)
+cl
+# Estimation
+a<-Sys.time()
+rf_100 <-ranger(churn~., data = train_un, classification = T, num.trees = 100)
+rf_200 <-ranger(churn~., data = train_un, classification = T, num.trees = 200)
+rf_300 <-ranger(churn~., data = train_un, classification = T, num.trees = 300)
+rf_500 <-ranger(churn~., data = train_un, classification = T, num.trees = 500)
+rf_700 <-ranger(churn~., data = train_un, classification = T, num.trees = 700)
+rf_800 <-ranger(churn~., data = train_un, classification = T, num.trees = 800, 
+                importance = 'impurity_corrected')
+Sys.time()-a
+#save(rf, file ='rf_100.Rdata')
 stopCluster(cl)
-
-pred_100_p <- predict(rf_100_p, data = test_under)$predictions
-error_pred_100_p <- test_y_under - pred_100_p
-
-pred_200_p <- predict(rf_200_p, data = test_under)$predictions
-error_pred_200_p <-test_y_under- pred_200_p
-
-pred_300_p <- predict(rf_300_p, data = test_under)$predictions
-error_pred_300_p <-test_y_under- pred_300_p
-
-pred_500_p <- predict(rf_500_p, data = test_under)$predictions
-error_pred_500_p <-test_y_under- pred_500_p
-
-pred_700_p <- predict(rf_700_p, data = test_under)$predictions
-error_pred_700_p <-test_y_under- pred_700_p
-
-pred_800_p <- predict(rf_100_p, data = test_under)$predictions
-error_pred_800_p <-test_y_under- pred_800_p
-
-rmse_100_p <- sqrt(sum(error_pred_100_p*error_pred_100_p)/length(error_pred_100_p))
-rmse_200_p <- sqrt(sum(error_pred_200_p*error_pred_200_p)/length(error_pred_200_p))
-rmse_300_p <- sqrt(sum(error_pred_300_p*error_pred_300_p)/length(error_pred_300_p))
-rmse_500_p <- sqrt(sum(error_pred_500_p*error_pred_500_p)/length(error_pred_500_p))
-rmse_700_p <- sqrt(sum(error_pred_700_p*error_pred_700_p)/length(error_pred_700_p))
-rmse_800_p <- sqrt(sum(error_pred_800_p*error_pred_800_p)/length(error_pred_800_p))
-
-
-rmse_p <- rbind(rmse_100_p, rmse_200_p, rmse_300_p, rmse_500_p, rmse_700_p, rmse_800_p)
-rmse_p <- cbind(num_arb, rmse_p)
-
-plot(rmse_p, ylab = "RMSE (m=p", xlab="#Tree", type = 'line')
-
-pred_100_m <- predict(rf_100_m, data = test_under)$predictions
-error_pred_100_m <- test_y_under - pred_100_m
-
-pred_200_m <- predict(rf_200_m, data = test_under)$predictions
-error_pred_200_m <-test_y_under- pred_200_m
-
-pred_300_m <- predict(rf_300_m, data = test_under)$predictions
-error_pred_300_m <-test_y_under- pred_300_m
-
-pred_500_m <- predict(rf_500_m, data = test_under)$predictions
-error_pred_500_m <-test_y_under- pred_500_m
-
-pred_700_m <- predict(rf_700_m, data = test_under)$predictions
-error_pred_700_m <-test_y_under- pred_700_m
-
-pred_800_m <- predict(rf_100_m, data = test_under)$predictions
-error_pred_800_m <-test_y_under- pred_800_m
-
-
-rmse_100_m <- sqrt(sum(error_pred_100_m*error_pred_100_m)/length(error_pred_100_m))
-rmse_200_m <- sqrt(sum(error_pred_200_m*error_pred_200_m)/length(error_pred_200_m))
-rmse_300_m <- sqrt(sum(error_pred_300_m*error_pred_300_m)/length(error_pred_300_m))
-rmse_500_m <- sqrt(sum(error_pred_500_m*error_pred_500_m)/length(error_pred_500_m))
-rmse_700_m <- sqrt(sum(error_pred_700_m*error_pred_700_m)/length(error_pred_700_m))
-rmse_800_m <- sqrt(sum(error_pred_800_m*error_pred_800_m)/length(error_pred_800_m))
-
-
-rmse_m <- rbind(rmse_100_m, rmse_200_m, rmse_300_m, rmse_500_m, rmse_700_m, rmse_800_m)
-rmse_m <- cbind(num_arb, rmse_m)
-
-plot(rmse_m, ylab = "RMSE (m=p/2", xlab="#Tree", type = 'line')
-
-pred_100_p2 <- predict(rf_100_p2, data = test_under)$predictions
-error_pred_100_p2 <- test_y_under - pred_100_p2
-
-pred_200_p2 <- predict(rf_200_p2, data = test_under)$predictions
-error_pred_200_p2 <-test_y_under- pred_200_p2
-
-pred_300_p2 <- predict(rf_300_p2, data = test_under)$predictions
-error_pred_300_p2 <-test_y_under- pred_300_p2
-
-pred_500_p2 <- predict(rf_500_p2, data = test_under)$predictions
-error_pred_500_p2 <-test_y_under- pred_500_p2
-
-pred_700_p2 <- predict(rf_700_p2, data = test_under)$predictions
-error_pred_700_p2 <-test_y_under- pred_700_p2
-
-pred_800_p2 <- predict(rf_100_p2, data = test_under)$predictions
-error_pred_800_p2 <-test_y_under- pred_800_p2
-
-rmse_100_p2 <- sqrt(sum(error_pred_100_p2*error_pred_100_p2)/length(error_pred_100_p2))
-rmse_200_p2 <- sqrt(sum(error_pred_200_p2*error_pred_200_p2)/length(error_pred_200_p2))
-rmse_300_p2 <- sqrt(sum(error_pred_300_p2*error_pred_300_p2)/length(error_pred_300_p2))
-rmse_500_p2 <- sqrt(sum(error_pred_500_p2*error_pred_500_p2)/length(error_pred_500_p2))
-rmse_700_p2 <- sqrt(sum(error_pred_700_p2*error_pred_700_p2)/length(error_pred_700_p2))
-rmse_800_p2 <- sqrt(sum(error_pred_800_p2*error_pred_800_p2)/length(error_pred_800_p2))
-
-rmse_p2 <- rbind(rmse_100_p2, rmse_200_p2, rmse_300_p2, rmse_500_p2, rmse_700_p2, rmse_800_p2)
-rmse_p2 <- cbind(num_arb, rmse_p2)
-
-plot(rmse_p2, ylab = "RMSE (m=sqrt(P)", xlab="#Tree", type = 'line')
-
-```
-
-
-```{r guardar modelos}
-
-save(rf_100_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf100_m.Rdata")
-save(rf_200_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf200_m.Rdata")
-save(rf_300_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf300_m.Rdata")
-save(rf_500_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf500_m.Rdata")
-save(rf_700_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf700_m.Rdata")
-save(rf_800_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf800_m.Rdata")
-save(rf_100_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf100_p.Rdata")
-save(rf_200_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf200_p.Rdata")
-save(rf_300_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf300_p.Rdata")
-save(rf_500_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf500_p.Rdata")
-save(rf_700_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf700_p.Rdata")
-save(rf_800_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf800_p.Rdata")
-save(rf_100_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf100_p2.Rdata")
-save(rf_200_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf200_p2.Rdata")
-save(rf_300_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf300_p2.Rdata")
-save(rf_500_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf500_p2.Rdata")
-save(rf_700_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf700_p2.Rdata")
-save(rf_800_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf800_p2.Rdata")
-
-
+# Guardar prediction error del OOB
+MSE_100 <- rf_100$prediction.error
+MSE_200 <- rf_200$prediction.error
+MSE_300 <- rf_300$prediction.error
+MSE_500 <- rf_500$prediction.error
+MSE_700 <- rf_700$prediction.error
+MSE_800 <- rf_800$prediction.error
+ 
+MSE <- as.data.frame(cbind(rf_100$prediction.error, rf_200$prediction.error, rf_300$prediction.error,
+               rf_500$prediction.error, rf_700$prediction.error, rf_800$prediction.error ))
+No.Tree <- cbind(100,200,300,500,700,800)
+MSE_RF <- t(as.data.frame(rbind(No.Tree, MSE)))
+kable(MSE_RF,
+      col.names = c("No.Tree", "MSE"), 
+      caption = "Prediction error" ) 
 
 ```
 
@@ -802,51 +629,342 @@ save(rf_800_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Persona
 
 ### 14. Escoge un random forest para hacer las predicciones. Grafica la importancia de las variables. Interpreta 
 
-```{r}
-# Prediccion 
-y_pred_pruned <- predict(arbol_pruning, newdata = testx,
-                        type = "vector")
-# Matriz de confusión
-  table(predicted = y_pred_pruned, actual = test$churn)
-#Guardamos prediccion del arbol junto a la del LASSO
-predicciones <- eval %>% select(customer, churn, y_pred) %>%
-                         rename(Y_lasso = y_pred) %>%
-                         mutate(Y_prunedtree = as.numeric(y_pred_pruned))
+```{r 14. Predic RF e importancia var}
+t0<-Sys.time()
+random_forest <- ranger(churn~., 
+                        data = training_set%>%select(-customer),
+                        classification = T,
+                        num.trees = 500,
+                        importance = "impurity",
+                        verbose = T)
+Sys.time() -t0
+save(random_forest, file = 'C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/random_forest.Rdata')
+stopCluster(cl)
+# Generamos un data frame con la importancia de las variables
+var_importance <- data.frame(importance(random_forest))
+var_importance <- bind_cols(variable = rownames(var_importance),var_importance)
+rownames(var_importance) <- 1:nrow(var_importance)
 
-
+#MONTSE
+important_var <- as.data.frame(importance_pvalues(rf_800)) %>%
+  filter(pvalue < 0.01) %>%
+  arrange(desc(importance))
+kable(important_var,
+      caption = "Most important variables (pvalue<0.01)")
 
 ```
 
 
 ### 15. Genera las predicciones OOS para el random forest. Guardalas en la misma data.frame que los otros modelos 
 
-```{r}
+```{r 15. Predic OOS}
 # Generamos las predicciones puntuales del modelo
-prediccion_forest <- predict(random_forest,
-                             data = validation_set%>%select(-c(customer,treat,churn)),
-                             type = "response")
-pred_forest <- prediccion_forest$predictions
+
+
+#MONTSE
+#Por efectos prácticos selecciono el RF con 700 árboles
+# Out of Bag:  
+oob <- rf_800$predictions
+# Prediction vectors:  
+pred_val<-predict(rf_800, data = validation)$predictions
+#Guardamos prediccion del random forest junto al resto 
+predicciones <- predicciones %>% 
+                         mutate(Y_randomfor = as.numeric(pred_val))
+
+
+
+
+#FAJARDO
+pred_800_p2 <- predict(rf_800_p2, data = test_under, type = 'response')
+predicciones$rf <- pred_800_p2$predictions
+
+
 ```
 
 
 
 ### 16 (2pts). Corre el mismo forest pero ahora con `probability = T`. Esto generará predicciones númericas en lugar de categóricas. Genera las predicciones continuas y guardalas en el mismo data frame
 
+```{r 16. Predict RF numérico}
+#CARLOS
+rf_700_cont <-ranger(churn~., data = train_un, probability = T, num.trees = 700)
+# Prediction vectors:  
+pred_val1<-predict(rf_700_cont, data = validation)$predictions
+#Guardamos prediccion del random forest junto al resto 
+predicciones <- predicciones %>% 
+                         mutate(Y_randomfor_prob0 = as.numeric(pred_val1[,1]),
+                                Y_randomfor_prob1 = as.numeric(pred_val1[,2]))
+
+```
+
+
 
 ### 17 (4 pts). Genera graficas de las curvas ROC para los tres modelos. Cual parece ser mejor?
 
+```{r 17. Curvas ROC}
+#CARLOS
+roc_lasso <- roc_curve(data = evaluacion%>%select(churn,pred_prob_lasso)%>%rename(pred=pred_prob_lasso),
+                       truth = churn, pred) 
+roc_tree <- roc_curve(data = evaluacion%>%select(churn,pred_prob_tree)%>%rename(pred=pred_prob_tree), 
+                      truth = churn, pred) 
+roc_rf <- roc_curve(data = evaluacion%>%select(churn, pred_prob_forest)%>%rename(pred=pred_prob_forest),
+                    truth = churn, pred) 
+# Para graficar la curva ROC del LASSO
+ggplot(roc_lasso, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ 
+  theme_bw()
+# Grafica curva ROC del arbol podado
+ggplot(roc_tree, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ 
+  theme_bw()
+# Grafica curva ROC del arbol podado
+ggplot(roc_rf, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ 
+  theme_bw()
+
+#MON
+#Curvas ROC para LASSO, Tree y Random Forest 
+roc_lasso <- roc_curve(data=predicciones, truth = churn, Y_lasso)
+roc_pruned <- roc_curve(data=predicciones, truth = churn, Y_prunedtree)
+roc_rf <- roc_curve(data=predicciones, truth = churn, Y_randomfor_prob1)
+g1 <- ggplot(roc_lasso,aes(x = specificity, y = sensitivity))+geom_abline(slope = -1, intercept = 1, linetype ='dashed')+geom_path(col = "plum3")+theme_bw()+
+    labs(title = "CV LASSO") +
+    theme(plot.title = element_text(hjust = 0.5))
+g2 <- ggplot(roc_pruned,aes(x = specificity, y = sensitivity))+geom_abline(slope = -1, intercept = 1, linetype ='dashed')+geom_path(col = "pink")+theme_bw()+
+    labs(title = "CV Pruned tree") +
+    theme(plot.title = element_text(hjust = 0.5))
+g3 <- ggplot(roc_rf,aes(x = specificity, y = sensitivity))+geom_abline(slope = -1, intercept = 1, linetype ='dashed')+geom_path(col = "lightblue3")+theme_bw()+
+    labs(title = "Random Forest") +
+    theme(plot.title = element_text(hjust = 0.5))
+grid.arrange(g1, g2, g3,
+             ncol = 2)
+
+
+#FAJARDO
+
+predicciones$obs <- as.factor(predicciones$obs)
+predicciones$pruned_score <- predicciones$pruned_score[,1]
+predicciones$rf_prob <- predicciones$rf_prob[,1]
+
+roc_lasso <- roc_curve(data = predicciones, truth = obs, "lasso_cvmin")
+
+roc_tree <- roc_curve(data = predicciones, truth = obs, "pruned_score")
+
+roc_rf <- roc_curve(data = predicciones, truth = obs, "rf_prob")
+
+# Para graficar la curva ROC del LASSO
+
+gg_roclasso <- ggplot(roc_lasso, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ 
+  labs(title = "Curva Roc",
+       subtitle = "Modelo Logit Lasso CV",
+       x = "Especificidad", y = "Sensibilidad")
+
+gg_roclasso + theme_economist()+
+  scale_color_economist()
+
+ggsave(gg_roclasso, filename = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/graphs/roc_lasso.jpeg")
+
+gg_roctree <- ggplot(roc_tree, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ 
+  labs(title = "Curva Roc",
+       subtitle = "Modelo pruned tree",
+       x = "Especificidad", y = "Sensibilidad")
+
+gg_roctree + theme_economist()+
+  scale_color_economist()
+
+ggsave(gg_roctree, filename = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/graphs/roc_tree.jpeg")
+
+
+gg_rocrf <- ggplot(roc_rf, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ 
+  labs(title = "Curva Roc",
+       subtitle = "Modelo Random Forest",
+       x = "Especificidad", y = "Sensibilidad")
+
+gg_rocrf + theme_economist()+
+  scale_color_economist()
+
+ggsave(gg_rocrf, filename = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/graphs/roc_rf.jpeg")
+
+```
+
+
+Los tres modelos tienen un poder de predicción muy pobre, incluso por debajo de un modelo aleatorio. El "menos peor" es el CV LASSO.
 
 
 ### 18. Genera una tabla con el AUC ROC. Cuál es el mejor modelo ? 
 
+```{r 18. Tabla AUC ROC}
+auc_lasso <- roc_auc(data = predicciones, truth = obs, "lasso_cvmin")
+auc_tree <- roc_auc(predicciones, truth = obs, "pruned_score")
+auc_rf <- roc_auc(predicciones, truth = obs, "rf_prob")
+
+auc_lasso
+auc_tree
+auc_rf
+
+Modelos <- c("CV LASSO", "CV Pruned tree", "Random forest")
+AUC <- c(auc_lasso$.estimate, auc_tree$.estimate, auc_rf$.estimate)
+AUC_ROC <- cbind(Modelos, AUC)
+kable(AUC_ROC,
+      digits=3,
+      caption = "AUC ROC")
+
+cat("El AUC más grande es el del RF con:", auc_rf$.estimate,"\n",
+    "seguido por el pruned_tree con:", auc_tree$.estimate, "\n",
+    "y en último lugar el logit lasso cv con:", auc_lasso$.estimate)
+```
+
+
+Todos los modelos tienen un AUC por debajo de 0.5, lo que indica que en general son malos prediciendo.
+
 
 ### 19 (2pts). Escoge un punto de corte para generar predicciones categoricas para el LASSO basado en la Curva ROC. Genera las matrices de confusión para cada modelo. Compáralas. Qué tipo de error es mas pernicioso? 
 
+Queremos que nuestro modelo sea mas sensible que especifico debido a que es mas importante controlar los falsos negativos (error del tipo 2), que los falsos positivos (error del tipo 1). Esto debido a que el costo de clasificar mal a un cliente que va a abandonar el producto, posiblemente sea mayor a implementar esfuerzos de retencion sobre aquellos que el modelo predice abandonaran pero no lo hacen.
+
+
+Queremos que nuestro modelo sea mas sensible que especifico debido a que es mas importante controlar los falsos negativos (error del tipo 2), que los falsos positivos (error del tipo 1). 
+
+El error tipo 1 es predecir que se va un cliente y que en realidad no se iba a ir. Es decir asignar ineficientemente recursos limitados en donde no se necesitaba.
+
+El error tipo 2 es no predecir que se va un cliente y que si se te vaya. Creemos que el esfuerzo tiene que concentrarse en la sensibilidad, que quienes decimos que se van, encontrarlos realmente. 
+
+$ sensibilidad = \frac{Verdadero \: positivo}{Falsos \: negativos + Verdadero \: positivo}  $
+
+El falso negativo es decir que el cliente no se va, no enfocar esfuerzos y que se termine yendo.
+
+
+```{r 19. Matriz de confusion}
+#MON
+#Punto de corte: 0.5
+#predic LASSO
+predicciones <- predicciones %>%
+  mutate(y_lasso_cat = ifelse(Y_lasso < 0.5, 0, 1),
+         y_pruned_cat = ifelse(Y_lasso < 0.5, 0, 1))
+# Matriz de confusión
+ paste("La matriz de confusión para el CV LASSO es:" )
+ table(predicted = predicciones$y_lasso_cat, actual = test$churn)  
+ 
+  paste("La matriz de confusión para el CV Pruned tree es:" )
+ table(predicted = predicciones$y_pruned_cat, actual = test$churn)  
+ 
+  paste("La matriz de confusión para el Random Forest es:" )
+ table(predicted = predicciones$Y_randomfor, actual = test$churn)  
+ 
+ # Función 'accuracy'
+accuracy = function(actual, predicted) {
+ mean(actual == predicted)*100
+}
+ paste("El porcentaje de acierto de un CV LASSO es de:", 
+       accuracy(predicted = predicciones$y_lasso_cat, actual = test$churn), "%")
+ 
+paste("El porcentaje de acierto de un CV Pruned tree  es de:", 
+       accuracy(predicted = predicciones$y_pruned_cat, actual = test$churn), "%")
+  
+ paste("El porcentaje de acierto de un Random Forest es de :", 
+       accuracy(predicted = predicciones$Y_randomfor, actual = test$churn), "%")
+```
+
+Se elige como punto de corte 0.5, por lo que todo valor <0.5 se considera como 0, y cualquier valor >=0.5 se considera como 1. 
+
+El Accuracy es mayor para el modelo de Random Forest, con un porcentaje de acierto del 59%.
 
 ### 20 (2pts). Finalmente, construye una lift table. Esto es, para 20 grupos del score predecido, genera 1) El promedio de las predicciones, 2) el promedio del churn observado. Existe monotonía? El mejor algoritmo es monotónico? (Tip: usa `ntile` para generar los grupos a partir de las predicciones)
 
 
+```{r 20. Lift table}
+# Modelo LASSO Logit
+#  Generamos 20 grupos de clientes de acuerdo a su score de abandono predecido y calculamos el promedio de las probabilidades de abandono por cuantil. 
+lift_table_lasso <- abandono%>%select(churn, pred_prob_lasso, abandono_lasso)%>%
+  mutate_at(c("churn","pred_prob_lasso","abandono_lasso"), ~as.numeric(.))%>%
+  mutate(score = as.integer(ntile(pred_prob_lasso, n=20)),
+         churn = case_when(churn==1~0,
+                           churn==2~1),
+         abandono_lasso = case_when(abandono_lasso==1~0,
+                                    abandono_lasso==2~1))%>%
+  group_by(score)%>%
+  summarise(observado = mean(churn)*100,
+            prediccion = mean(abandono_lasso)*100)%>%
+  pivot_longer(cols = c(observado,prediccion))
+# Grafica
+ggplot(lift_table_lasso, aes(x=score, y=value, fill=name))+
+  geom_point(shape=21, size=2)+
+  geom_path()+
+  labs(title = "Modelo LASSO Logit",
+       x="Cuantil de Probabilidad de Abandono (20 Grupos)",
+       y = "Porcentaje")+
+  theme_bw()+
+  theme(axis.text = element_text(size=12), text = element_text(size=12), legend.position = "bottom")+
+  ggsave(height = 6, width = 6, filename = "Graficas/lift_table_lasso.png")
+  
+```
+
+```{r}
+# Modelo - Pruned Tree 
+lift_table_tree <- abandono%>%select(churn, pred_prob_tree, abandono_tree)%>%
+  mutate_at(c("churn","pred_prob_tree","abandono_tree"), ~as.numeric(.))%>%
+  mutate(score = as.integer(ntile(pred_prob_tree, n=20)),
+         churn = case_when(churn==1~0,
+                           churn==2~1),
+         abandono_tree = case_when(abandono_tree==1~0,
+                                    abandono_tree==2~1))%>%
+  group_by(score)%>%
+  summarise(observado = mean(churn)*100,
+            prediccion = mean(abandono_tree)*100)%>%
+  pivot_longer(cols = c(observado,prediccion))
+# Grafica
+ggplot(lift_table_tree, aes(x=score, y=value, fill=name))+
+  geom_point(shape=21, size=2)+
+  geom_path()+
+  labs(title = "Modelo Pruned Tree",
+       x="Cuantil de Probabilidad de Abandono (20 Grupos)",
+       y = "Porcentaje")+
+  theme_bw()+
+  theme(axis.text = element_text(size=12), text = element_text(size=12), legend.position = "bottom")+
+  ggsave(height = 6, width = 6, filename = "Graficas/lift_table_tree.png")
+```
+
+
+```{r}
+#Modelo Random Forest
+lift_table_rf <- abandono%>%select(churn, pred_prob_forest, abandono_rf)%>%
+  mutate_at(c("churn","pred_prob_forest","abandono_rf"), ~as.numeric(.))%>%
+  mutate(score = as.integer(ntile(pred_prob_forest, n=20)),
+         churn = case_when(churn==1~0,
+                           churn==2~1),
+         abandono_rf = case_when(abandono_rf==1~0,
+                                    abandono_rf==2~1))%>%
+  group_by(score)%>%
+  summarise(observado = mean(churn)*100,
+            prediccion = mean(abandono_rf)*100)%>%
+  pivot_longer(cols = c(observado,prediccion))
+# Grafica
+ggplot(lift_table_rf, aes(x=score, y=value, fill=name))+
+  geom_point(shape=21, size=2)+
+  geom_path()+
+  labs(title = "Modelo Random Forest",
+       x="Cuantil de Probabilidad de Abandono (20 Grupos)",
+       y = "Porcentaje")+
+  theme_bw()+
+  theme(axis.text = element_text(size=12), text = element_text(size=12), legend.position = "bottom")+
+  ggsave(height = 6, width = 6, filename = "Graficas/lift_table_rf.png")
+
+
+
+```
+
 
 ### 21. Concluye. Que estrategia harías con este modelo? Cómo generarías valor a partir de el?
+
+Se puede pensar en adaptar una estrategia de retencion enfocada hacia los clientes clasificados como propensos a abandonar. Dado que algunas de las variables relevantes fueron el numero de dias que llevaban con el equipo (>360 dias eran propensos a abandonar) se puede pensar en ofrecerles alguna promocion para renovar su equipo de celular. Adicionamente, una de las variables que ayuda a determinar el abandono fue si el cliente experimento una reparacion de celular, por lo que puede pensarse en buscar renovar los equipos dañados. 
 
 
