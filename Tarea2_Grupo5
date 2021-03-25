@@ -1,0 +1,852 @@
+---
+title: "Predicción de Abandono"
+author: "Tarea 2, Grupo 5"
+date: "2021"
+output: pdf_document
+urlcolor: blue
+graphics: yes
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = NA, message = FALSE,
+                      fig.width = 7, fig.height = 4, fig.align = "right")
+```
+
+```{r, warning=FALSE}
+library(tidyverse)
+library(data.table)
+library(broom)
+library(knitr)
+library(lubridate)
+library(RCT)
+library(gamlr)
+library(ranger)
+library(tree)
+library(parallel)
+library(tidymodels)
+library(randomForest)
+library(fastDummies)
+library(dplyr)
+library(parallel)
+library(ROCR)
+library(yardstick)
+library(ggplot2)
+```
+
+
+
+## Contexto
+
+Cell2Cell es una compañía de teléfonos celulares que intenta mitigar el abandono de sus usuarios. Te contratan para 1) Encontrar un modelo que prediga el abandono con acierto y para usar los insights de este modelo para proponer una estrategia de manejo de abandono.
+
+
+Las preguntas que contestaremos son:
+
+1. Se puede predecir el abandono con los datos que nos compartieron? 
+
+Si se puede, tenemos datos que nos ayudan a ver que usuarios se quedaron y cuales abandonaron (churn). En promedio 29% de los clientes han abandonado entre 30 y 60 días después de su fecha de observación y el resto siguen siendo clientes. 
+
+2. Cuáles son las variables que explican en mayor medida el abandono? 
+
+
+
+3. Qué incentivos da Cell2Cell a sus usarios para prevenir el abandono?
+
+4. Cuál es el valor de una estrategia de prevención de abandono focalizada y cómo difiere entre los segmentos de los usuarios? Qué usuarios deberían de recibir incentivos de prevención? Qué montos de incentivos
+
+Nota: Voy a evaluar las tareas con base en la respuesta a cada pregunta. Como hay algunas preguntas que no tienen una respuesta clara, al final ponderaré de acuerdo al poder predictivo de su modelo vs las respuestas sugeridas. 
+
+
+
+\newpage
+
+## Datos
+
+Los datos los pueden encontrar en `Cell2Cell.Rdata`. En el archivo `Cell2Cell-Database-Documentation.xlsx` pueden encontrar documentación de la base de datos. 
+
+Cargemos los datos
+```{r cargamos los datos}
+setwd('C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2')
+load('Cell2Cell.Rdata')
+```
+
+### 1. Qué variables tienen missing values? Toma alguna decisión con los missing values. Justifica tu respuesta
+
+Hay muy pocos missing values, vamos a eliminarlos todos.
+
+```{r missing values, echo=TRUE}
+faltantes <- map_dbl(cell2cell%>%select_all, function(x) 100*sum(is.na(x))/nrow(cell2cell))
+faltantes <- data.frame(faltantes[faltantes>0])
+
+colnames(faltantes) <- "Porcentaje Faltantes"
+
+faltantes <- faltantes %>% 
+  arrange(desc(`Porcentaje Faltantes`))
+
+kable(faltantes, caption = "Tabla para variables NA",
+      col.names = c("Porcentaje"), 
+      digits = 3)
+
+```
+
+Hay pocas observaciones faltantes, distribuidas en las siguientes columnas:
+  recchrge - recurring charge, el valor promedio del plan de consumo;
+  overage - el exceso de minutos de llamadas;
+  roam - el número de llamadas en roaming;
+  changem - el cambio % en la utilización de minutos;
+  changer - el cambio % en el gasto; 
+  revenue - el gasto promedio; 
+  mou - los minutos utilizados por mes;
+  phones - el número de teléfonos que el usario ha utilizado;
+  models - el número de modelos de teléfono que el usuario ha utilizado;
+  age1 - la edad del 1er miembro del hogar;
+  age2 - la edad del 2do miembro del hogar;
+  eqpdays - el número de dias com el teléfono; y
+  directas - el número promedio de llamadas con asistencia.
+Hay observaciones que no podemos estimar o soponer y, así, se propone quitarlas
+de la base. Son las observaciones contenidas en: recchrge, overage, changem, 
+changer, eqpdays, revenue y mou.
+Otras observaciones podemos suponer que los NAs serían 0 (roam y directas) o que 
+tienen el valor de 1 (phones y models. O sea, se supone que el usurario ha 
+tenido apenas un teléfono con la comopañia).
+La variable de edad (age1 y age2) tiene pocos NAs, pero presenta vários valores
+iguales a 0 (más de 20 mil observaciones). Así, se propone sustituyer los NAs y
+los valores 0 por el promedio.
+Además de NAs, la variable de días con el equipo (eqpdays) y de costo del plan 
+(rechchrege) presentan unos pocos valores negativos que no hacen sentido. 
+Se propone quitar los valores negativos de la base. 
+
+
+
+```{r quitamos NA y reemplazamos datos}
+
+# Quitando de la base
+cell2cell <- cell2cell %>%
+  filter(!is.na(changem),
+         !is.na(changer),
+         !is.na(revenue),
+         !is.na(mou),
+         !is.na(recchrge),
+         !is.na(overage),
+         !is.na(eqpdays))
+
+# Igualando a 0 o 1
+cell2cell$roam[cell2cell$roam == "NA"] <- 0
+cell2cell$directas[cell2cell$directas == "NA"] <- 0
+cell2cell$phones[cell2cell$phones == "NA"] <- 1
+cell2cell$models[cell2cell$models == "NA"] <- 1
+
+
+# Igualando al promedio
+cell2cell$age1[cell2cell$age1 == 0] <- mean(cell2cell$age1)
+cell2cell$age1[cell2cell$age2 == 0] <- mean(cell2cell$age2)
+cell2cell$age1[is.na(cell2cell$age1)] <- mean(cell2cell$age1, na.rm = T)
+cell2cell$age2[is.na(cell2cell$age2)] <- mean(cell2cell$age2, na.rm = T)
+
+# Quitando valores negativos de la base
+cell2cell <- cell2cell[cell2cell$eqpdays > 0 & cell2cell$recchrge >0]
+
+# Verificando que no quedan más NAs
+faltantes <- map_dbl(cell2cell%>%select_all, function(x) 100*sum(is.na(x))/nrow(cell2cell))
+faltantes <- data.frame(faltantes[faltantes>0])
+
+colnames(faltantes) <- "Porcentaje Faltantes"
+
+faltantes <- faltantes %>% 
+  arrange(desc(`Porcentaje Faltantes`))
+
+kable(faltantes, caption = "Tabla para variables NA",
+      col.names = c("Porcentaje"), 
+      digits = 3)
+
+
+
+```
+
+*Hay pocas observaciones faltantes, distribuidas en las siguientes columnas:
+  recchrge - recurring charge, el valor promedio del plan de consumo;
+  overage - el exceso de minutos de llamadas;
+  roam - el número de llamadas en roaming;
+  changem - el cambio % en la utilización de minutos;
+  changer - el cambio % en el gasto; 
+  revenue - el gasto promedio; 
+  mou - los minutos utilizados por mes;
+  phones - el número de teléfonos que el usario ha utilizado;
+  models - el número de modelos de teléfono que el usuario ha utilizado;
+  age1 - la edad del 1er miembro del hogar;
+  age2 - la edad del 2do miembro del hogar;
+  eqpdays - el número de dias com el teléfono; y
+  directas - el número promedio de llamadas con asistencia.
+Hay observaciones que no podemos estimar o soponer y, así, se propone quitarlas
+de la base. Son las observaciones contenidas en: recchrge, overage, changem, 
+changer, eqpdays, revenue y mou.
+Otras observaciones podemos suponer que los NAs serían 0 (roam y directas) o que 
+tienen el valor de 1 (phones y models. O sea, se supone que el usurario ha 
+tenido apenas un teléfono con la comopañia).
+La variable de edad (age1 y age2) tiene pocos NAs, pero presenta vários valores
+iguales a 0 (más de 20 mil observaciones). Así, se propone sustituyer los NAs y
+los valores 0 por el promedio.
+Además de NAs, la variable de días con el equipo (eqpdays) y de costo del plan 
+(rechchrege) presentan unos pocos valores negativos que no hacen sentido. 
+Se propone quitar los valores negativos de la base. 
+
+
+### 2. Tabula la distribución de la variable `churn`. Muestra la frecuencia absoluta y relativa. Crees que se debe hacer oversampling/undersamping?  
+
+Conviene hacer undersampling, ya que los datos del estudio de interés son la mitad de los que tenemos en el otro grupo.
+Por lo tanto creo será mejor así. Además evitamos generar variables sintéticas.
+
+```{r}
+#Obtengo los datos para hacer mi tabla de frecuencias -
+valores <- c(0,1)
+freq_abs <- summary(as.factor(cell2cell$churn))
+freq.tab <- as.data.frame(cbind(valores, freq_abs))
+freq.tab <- freq.tab %>%
+  mutate(freq_rel = freq_abs/sum(freq_abs))
+knitr::kable(freq.tab,
+             caption = "Tabla Abandono: frecuencia relativa y absoluta",
+             digits = 2)
+```
+
+
+
+### 3. (2 pts) Divide tu base en entrenamiento y validación (80/20). Además, considera hacer oversampling (SMOTE) o undersampling. (Tip: Recuerda que el objetivo final es tener muestra ~balanceada en el traning set. En el validation la distribución debe ser la original)
+
+
+Vamos a hacer el Undersampling. Para esto sólo necesitamos utilizar la librería sample incluida en R.
+Esto nos permite tomar muestras aleatorias, unicamente hay que decirle de que tamaño, en este caso serán del grupo más chico (los que se abandonaron o churn=1).
+
+```{r}
+# Vamos a hacer una distribucion 80 - 20 entre el training y validation set
+# Generamos una variable de cuartiles de revenue para considerar como estrato en la division de la base
+cell2cell <- cell2cell%>%
+  mutate(cuartiles_revenue = ntile_label(revenue,4,0))
+#Hacemos la aleatorizacion para dividir la base
+asignacion <- treatment_assign(cell2cell, 
+                               share_control = 0.80,
+                               n_t = 1,
+                               strata_varlist = c("churn","cuartiles_revenue"),
+                               seed = 1994,
+                               key="customer")
+list2env(asignacion, envir = .GlobalEnv)
+cell2cell <- left_join(cell2cell,
+                       data%>%ungroup()%>%select(customer,treat),
+                       by="customer")
+cell2cell$cuartiles_revenue <- NULL
+```
+
+Dividimos la base en entrenamiento y validacion y revisamos que la base de entrenamiento se encuentra balanceada por clases
+```{r}
+# Base de entrenamiento (80%) 
+training_set <- cell2cell%>%
+  filter(treat=0)
+#Base de validacion (20%)
+validation_set <- cell2cell%>%
+  filter(treat==1)
+rm(asignacion, data, summary_strata, variables)
+# Realizamos un undersampling para reducir las observaciones de la clase mas comun. Esto mediante un muestreo
+# estratificado. Las ventajas de este metodo sobre el oversampling es que no generas info sintentica.
+asignacion <- treatment_assign(training_set%>%filter(churn==0),
+                               share_control = 0.4055,
+                               n_t = 1,
+                               strata_varlist = c("churn"),
+                               seed = 1994,
+                               key="customer")
+list2env(asignacion, envir = .GlobalEnv)
+## Juntamos la asignacion con el training set
+training_set <- left_join(training_set%>%select(-treat),
+                         data%>%ungroup()%>%select(customer,treat),
+                         by="customer")
+training_set <- training_set%>%
+  filter(treat==0 | is.na(treat))%>%
+  select(-treat)
+rm(asignacion, data, summary_strata, variables)
+prop.table(table(training_set$churn))
+table(training_set$churn)
+```
+
+
+## Model estimation
+
+Pondremos a competir 3 modelos: 
+
+1. Cross-Validated LASSO-logit
+
+2. Prune Trees
+
+3. Random Forest
+
+### 4 (2 pts). Estima un cross validated LASSO. Muestra el la gráfica de CV Binomial Deviance vs Complejidad
+
+Vamos a realizar el CV LASSO-logit para el set de entrenamiento partido normal y el partido undersampling.
+Eso nos permitirá ver la diferencia en los estimadores si no consideramos esto.
+
+```{r}
+Xs <- training_set %>%select(-c(customer,churn))
+Xs <- sparse.model.matrix(~.+0, data=Xs)
+# La sparse model matrix en lugar de guardar todos los registros 0 y 1, solo guarda las posiciones donde hay 1s
+# Entonces resume mucha info en una matriz mucho mas pequena. Podemos declara la formula que nosotros queremos
+# Sin intercepto: .+0
+# Interacciones con Variable: .+.*Variable 
+# Polinomios .^2
+y <- training_set$churn
+#Cluster for parallelization
+detectCores()
+cl <- makeCluster(8) 
+cl
+# Estimar CV Logit Lasso on 5 folds
+lasso_logit <- cv.gamlr(x=Xs, y=y, nfold=5, verb=T, cl = cl, family='binomial')
+# Cuando corremos algo de forma paralelizado la computadora se hace menos poderosa
+# entonces mejor volver a juntar los nucleos
+
+# Prediciendo.  
+y_pred<- predict(lasso$gamlr, testx ,type ='response',select = lasso$seg.min)
+y_pred<-as.numeric(y_pred)
+
+stopCluster(cl)
+save(lasso_logit, file = 'C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/lasso_logit.Rdata')
+rm(cl, Xs)
+
+```
+
+
+### 5. Grafica el Lasso de los coeficientes vs la complejidad del modelo.   
+
+```{r}
+plot(lasso_logit)
+plot(lasso_logit$gamlr)
+```
+
+
+
+\newpage
+
+### 6 (2 pts). Cuál es la $\lambda$ resultante? Genera una tabla con los coeficientes que selecciona el CV LASSO. Cuántas variables deja iguales a cero? Cuales son las 3 variables más importantes para predecir el abandono? Da una explicación intuitiva a la última pregunta
+
+
+Las 3 variables, sin contar el intercepto, con mayor importancia son: retcall, creditaa, refurb.
+- retcall: llamadas realizadas por el cliente al equipo de retención
+- creditaa: riesgo de crédito aa \{1=si\}
+- refurb: si el auricular está reacondicionado para su venta, es decir equipos devueltos al fabricante, reparados y revendidos.
+
+A priori, podríamos pensar que los clientes que marcaron al equipo de retencion buscan alguna promoción para no irse y al no conseguiirla abandonan, adicionalmente aquellos que tienen un mayor riesgo crediticio aa disminuye la probabilidad de irse. Por último aquellos que tienen equipos revendidos pueden ser más suceptibles a abandonar debido a que sus equipos son más baratos y por lo tanto de menor calidad, provocando que su servicio sea malo y por último se vayan antes.
+
+```{r}
+
+lambda_min_under <- (lasso_under$lambda.min) 
+lambda_1std_under <-(lasso_under$lambda.1se) 
+
+tabla_lambda <- rbind(lambda_min_under, lambda_1std_under)
+
+kable(tabla_lambda, caption = "Lambdas del modelo (under = undersample)",
+      col.names = c("Lambda"), 
+      digits = 8)
+
+#Lambda resultante
+cat("La Lambda que minimiza el modelo es: ",lambda_min_under,"\n")
+cat("La Lambda que 1 Std del modelo es: ",lambda_1std_under,"\n")
+
+#Tabla coefs que selecciona el LASSO
+#coef(lasso, select="min")
+B <- coef(lasso)[-1,] 
+B[c(which.min(B),which.max(B))]
+coefs <- as.data.frame(B) %>%
+  filter(B !=0)
+kable(coefs,
+      caption = "Coefs que selecciona el LASSO")
+#Variables que deja en 0
+coefs_0 <- as.data.frame(B) %>%
+  filter(B == 0)
+kable(coefs_0,
+      caption = "Coefs que deja en 0 el LASSO")
+#No. variables que deja en 0
+nrow(coefs_0)
+# 3 variables mas importantes
+coefs <- abs(coefs) %>% arrange(desc(B))
+coefs <- tibble::rownames_to_column(coefs, "Variable")
+
+coefs_mas <- head(coefs, 4)
+kable(coefs_mas, caption = "Coeficientes con mayor peso",
+      col.names = c("Coeficiente", "|Coeficiente|"),
+      ddigits = 3)
+
+
+```
+
+
+La variable 'retcall' se refiere al número de llamadas realizadas al usuario por el equipo de retención, en el que convencen al cliente de renovar y le ofrecen ofertas, por lo que tiene mucho sentido que sea una de las variablas más importantes para explicar la decisión de abandono o no.
+
+Por otro lado, la variable 'creditaa' se refiere a una alta calificación crediticia, por lo que podría el cliente seguir utilizando su línea de crédito para seguir teniendo el servicio aún si no cuenta con la liquidez necesaria en algún momento.
+
+Por último, la variable 'refurb' se refiere a la renovación del equipo, por lo que es lógico que ante dicha renovación cuando se acaba el mes de servicio, le inviten al cliente a continuar con el mismo y  no abandone.
+
+
+### 7. Genera un data frame (usando el validation set) que tenga: `customer`, `churn` y las predicciones del LASSO. 
+
+```{r pred y roc logit cv lasso}
+
+#########################################################################   MONTSE
+eval <- validation %>%
+                  select(customer, churn) %>%
+                  mutate(churn_pred = y_pred)
+eval <- eval %>%
+  mutate(churn = as.factor(churn),
+         y_pred = as.numeric(y_pred))
+# Roc curve
+roc <- yardstick::roc_curve(data=eval, truth = churn, y_pred)
+ggplot(roc,aes(x = specificity, y = sensitivity))+geom_abline(slope = -1, intercept = 1, linetype ='dashed')+geom_path()+theme_bw()
+roc_auc(eval, truth = churn, y_pred)
+##########################################################################
+
+#Prediccion en Base de Validacion
+# Prediction Vectors
+
+test_under<- select(test_under, -customer, -churn)
+test_under <- as.numeric(unlist(test_under))
+typeof(test_under)
+
+X_validation <- sparse.model.matrix(~.+0, data=test_under)
+
+
+
+rediccion_1 <- drop(predict(lasso_under$gamlr, X_validation,
+                      type='response',
+                      select = lasso_under$seg.min))
+
+
+prediccion_2 <- drop(predict(lasso_under$gamlr, X_validation,
+                      type='response',
+                      select = lasso_under$seg.1se))
+
+#response es el score de probabilidad, la prediccion del Lasso
+#Que escoja el segmento minimo (donde se minimiza el error de pred fuera de la muesta)
+
+eval_1 <- bind_cols(test_y_under, prediccion_1)
+colnames(eval_1) <- cbind("obs","pred_1")
+eval_1$obs <- as.factor(eval_1$obs)
+
+eval_2 <- bind_cols(test_y_under, prediccion_2)
+colnames(eval_2) <- cbind("obs","pred_2")
+eval_2$obs <- as.factor(eval_2$obs)
+
+curva_1 <- yardstick::roc_curve(data = eval_1, truth = obs, "pred_1")
+curva_2 <- yardstick::roc_curve(data = eval_2, truth = obs, "pred_2")
+
+#truth es la columna donde esta la y observada, la otra entrada es para epecificar cual es la clase positiva.
+
+#Lo que te sale de esta funcion no es una curva, si no una tabla con la especificidad y sensibilidad resultantes para cada corte de probabilidad
+
+# Para graficar la curva ROC
+curva_roc_1 <- ggplot(curva_1, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ # Para graficar el continuio de puntos
+  theme_bw()
+
+
+curva_roc_2 <- ggplot(curva_2, aes(x=specificity, y=sensitivity))+
+  geom_abline(slope = -1, intercept = 1, linetype= 'dashed')+
+  geom_path()+ # Para graficar el continuio de puntos
+  theme_bw()
+
+curva_roc_1
+curva_roc_2
+
+#ggsave(height = 6, width = 6, filename = "Graficas/roc_lasso.png")
+
+# Para calcular el area debajo de la curva.
+AUC_1 <- yardstick::roc_auc(eval_1, truth = obs, "pred_1")
+AUC_2 <- yardstick::roc_auc(eval_2, truth = obs, "pred_2")
+
+AUC_1
+AUC_2
+
+cat("El AUC del modelo de lambda minima es: ",AUC_1$.estimate,"\n",
+    "El AUC del modelo de lambda 1 Std es: ",AUC_2$.estimate,"\n",
+    "Por lo tanto: un chimpance aventando dardos lo hubiera hecho mejor")
+
+
+
+```
+
+
+### 8. Estima ahora tree. Usa `mindev = 0.05, mincut = 1000` Cuántos nodos terminales salen? Muestra el summary del árbol
+
+```{r arbol}
+
+dfarbol <- cbind(train_y_under, train_under)
+detectCores()
+cl<-makeCluster(4)
+cl
+arbol <- tree(train_y_under ~. , data = dfarbol, mincut = 1000, mindev = 0.05)
+
+stopCluster(cl)
+save(arbol, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/arbol.Rdata")
+
+summary(arbol)
+
+```
+
+
+### 9. Grafica el árbol resultante 
+
+```{r grafica arbol}
+
+plot(arbol$weights)
+
+```
+
+
+### 10. Poda el árbol usando CV. Muestra el resultado. Grafica Tree Size vs Binomial Deviance. Cuál es el mejor tamaño del árbol? Mejora el Error?
+
+
+```{r}
+
+
+detectCores()
+cl<-makeCluster(4)
+arbol_2 <- tree(train_y_under ~. , data = dfarbol)
+
+cv_arbol<-cv.tree(arbol_2, K= 10)
+stopCluster(cl)
+
+save(arbol_2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/a-rbol2.Rdata")
+save(cv_arbol, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/cv_arbol.Rdata")
+
+
+summary(arbol_2)
+summary(cv_arbol)
+
+```
+
+
+
+### 11. Gráfica el árbol final. (Tip: Checa `prune.tree`)
+
+```{r}
+
+pr_arbol <- prune.tree(arbol_2, best = 2)
+plot(pr_arbol); text(pr_arbol)
+summary(pr_arbol)
+
+
+```
+
+
+
+### 12. Genera las predicciones del árbol pruned. Guardalas en la base de predicciones. Guarda el score y la prediccion categorica en la misma data frame donde guardaste las predicciones del LASSO
+
+```{r}
+prediccion_pr <- predict(pr_arbol, dfarbol, type='vector')
+plot(prediccion_pr,dfarbol); text(prediccion_pr)
+
+
+
+drop(prediccion_pr)
+
+eval_2 <- bind_cols(test_y_under, prediccion_2)
+colnames(eval_2) <- cbind("obs","pred_2")
+eval_2$obs <- as.factor(eval_2$obs)
+
+# Prediccion 
+y_pred_pruned <- predict(arbol_pruning, newdata = testx,
+                        type = "vector")
+# Matriz de confusión
+  table(predicted = y_pred_pruned, actual = test$churn)
+#Guardamos prediccion del arbol junto a la del LASSO
+predicciones <- eval %>% select(customer, churn, y_pred) %>%
+                         rename(Y_lasso = y_pred) %>%
+                         mutate(Y_prunedtree = as.numeric(y_pred_pruned))
+
+
+
+# Generamos las predicciones del modelo en la base de validacion
+prediccion_arbol <- predict(pr_arbol, 
+                            newdata = validation_set%>%select(-c(customer,churn,treat)),
+                            type = "vector")
+pred_tree <- bind_cols(validation_set%>%select(customer), prediccion_arbol)
+prediccion_arbol <- data.frame(predict(pr_arbol, 
+                            newdata = validation_set%>%select(-c(customer,churn,treat)),
+                            type = "vector"))
+evaluacion <- bind_cols(pred_tree,prediccion_arbol%>%select(X1),evaluacion)
+colnames(evaluacion) <- c("customer", "pred_tree", "pred_prob_tree", "churn", "pred_prob_lasso")
+evaluacion <- evaluacion%>%
+  select(customer,churn,pred_prob_lasso,pred_prob_tree,pred_tree)
+rm(prediccion_arbol,pred_tree,arbol, arbol_pruned)
+
+```
+
+
+
+### 13 (4pts). Corre un Random Forest ahora. Cuál es la $B$ para la que ya no ganamos mucho más en poder predictivo?
+
+- Corre para `num.trees=100,200,300, 500, 700, 800`
+
+- En cada caso, guarda únicamente el `prediction.error`
+
+```{r con p}
+p <- ncol(train_under)
+p
+p2 <- p/2
+p2
+m <- sqrt(p)
+m <- round(m, digits = 0)
+m
+num_arb <- c(100, 200, 300, 500, 700, 800)
+B <- c(p, p2, m)
+
+detectCores()
+cl<-makeCluster(4)
+cl
+inicio <- Sys.time()
+
+a_100_p<-Sys.time()
+rf_100_p<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 100, mtry = p)
+a_100_p <- Sys.time()-a_100_p
+
+a_200_p<-Sys.time()
+rf_200_p<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 200, mtry = p)
+a_200_p <- Sys.time()-a_200_p
+
+a_300_p<-Sys.time()
+rf_300_p<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 300, mtry = p)
+a_300_p <- Sys.time()-a_300_p
+
+a_500_p<-Sys.time()
+rf_500_p<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 500, mtry = p)
+a_500_p <- Sys.time()-a_500_p
+
+a_700_p<-Sys.time()
+rf_700_p <-ranger(train_y_under~., data = train_under, classification = T, num.trees = 700, mtry = p)
+a_700_p <- Sys.time()-a_700_p
+
+a_800_p<-Sys.time()
+rf_800_p<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 800, mtry = p)
+a_800_p <- Sys.time()-a_800_p
+
+
+a_100_m<-Sys.time()
+rf_100_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 100, mtry = m)
+a_100_m <- Sys.time()-a_100_m
+
+a_200_m<-Sys.time()
+rf_200_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 200, mtry = m)
+a_200_m <- Sys.time()-a_200_m
+
+a_300_m<-Sys.time()
+rf_300_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 300, mtry = m)
+a_300_m <- Sys.time()-a_300_m
+
+a_500_m<-Sys.time()
+rf_500_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 500, mtry = m)
+a_500_m <- Sys.time()-a_500_m
+
+a_700_m<-Sys.time()
+rf_700_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 700, mtry = m)
+a_700_m <- Sys.time()-a_700_m
+
+a_800_m<-Sys.time()
+rf_800_m<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 800, mtry = m)
+a_800_m <- Sys.time()-a_800_m
+
+
+a_100_p2<-Sys.time()
+rf_100_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 100, mtry = p2)
+a_100_p2 <- Sys.time()-a_100_p2
+
+a_200_p2<-Sys.time()
+rf_200_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 200, mtry = p2)
+a_200_p2 <- Sys.time()-a_200_p2
+
+a_300_p2<-Sys.time()
+rf_300_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 300, mtry = p2)
+a_300_p2 <- Sys.time()-a_300_p2
+
+a_500_p2<-Sys.time()
+rf_500_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 500, mtry = p2)
+a_500_p2 <- Sys.time()-a_500_p2
+
+a_700_p2<-Sys.time()
+rf_700_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 700, mtry = p2)
+a_700_p2 <- Sys.time()-a_700_p2
+
+a_800_p2<-Sys.time()
+rf_800_p2<-ranger(train_y_under~., data = train_under, classification = T, num.trees = 800, mtry = p2)
+a_800_p2 <- Sys.time()-a_800_p2
+
+fin <- Sys.time()-inicio
+
+stopCluster(cl)
+
+pred_100_p <- predict(rf_100_p, data = test_under)$predictions
+error_pred_100_p <- test_y_under - pred_100_p
+
+pred_200_p <- predict(rf_200_p, data = test_under)$predictions
+error_pred_200_p <-test_y_under- pred_200_p
+
+pred_300_p <- predict(rf_300_p, data = test_under)$predictions
+error_pred_300_p <-test_y_under- pred_300_p
+
+pred_500_p <- predict(rf_500_p, data = test_under)$predictions
+error_pred_500_p <-test_y_under- pred_500_p
+
+pred_700_p <- predict(rf_700_p, data = test_under)$predictions
+error_pred_700_p <-test_y_under- pred_700_p
+
+pred_800_p <- predict(rf_100_p, data = test_under)$predictions
+error_pred_800_p <-test_y_under- pred_800_p
+
+rmse_100_p <- sqrt(sum(error_pred_100_p*error_pred_100_p)/length(error_pred_100_p))
+rmse_200_p <- sqrt(sum(error_pred_200_p*error_pred_200_p)/length(error_pred_200_p))
+rmse_300_p <- sqrt(sum(error_pred_300_p*error_pred_300_p)/length(error_pred_300_p))
+rmse_500_p <- sqrt(sum(error_pred_500_p*error_pred_500_p)/length(error_pred_500_p))
+rmse_700_p <- sqrt(sum(error_pred_700_p*error_pred_700_p)/length(error_pred_700_p))
+rmse_800_p <- sqrt(sum(error_pred_800_p*error_pred_800_p)/length(error_pred_800_p))
+
+
+rmse_p <- rbind(rmse_100_p, rmse_200_p, rmse_300_p, rmse_500_p, rmse_700_p, rmse_800_p)
+rmse_p <- cbind(num_arb, rmse_p)
+
+plot(rmse_p, ylab = "RMSE (m=p", xlab="#Tree", type = 'line')
+
+pred_100_m <- predict(rf_100_m, data = test_under)$predictions
+error_pred_100_m <- test_y_under - pred_100_m
+
+pred_200_m <- predict(rf_200_m, data = test_under)$predictions
+error_pred_200_m <-test_y_under- pred_200_m
+
+pred_300_m <- predict(rf_300_m, data = test_under)$predictions
+error_pred_300_m <-test_y_under- pred_300_m
+
+pred_500_m <- predict(rf_500_m, data = test_under)$predictions
+error_pred_500_m <-test_y_under- pred_500_m
+
+pred_700_m <- predict(rf_700_m, data = test_under)$predictions
+error_pred_700_m <-test_y_under- pred_700_m
+
+pred_800_m <- predict(rf_100_m, data = test_under)$predictions
+error_pred_800_m <-test_y_under- pred_800_m
+
+
+rmse_100_m <- sqrt(sum(error_pred_100_m*error_pred_100_m)/length(error_pred_100_m))
+rmse_200_m <- sqrt(sum(error_pred_200_m*error_pred_200_m)/length(error_pred_200_m))
+rmse_300_m <- sqrt(sum(error_pred_300_m*error_pred_300_m)/length(error_pred_300_m))
+rmse_500_m <- sqrt(sum(error_pred_500_m*error_pred_500_m)/length(error_pred_500_m))
+rmse_700_m <- sqrt(sum(error_pred_700_m*error_pred_700_m)/length(error_pred_700_m))
+rmse_800_m <- sqrt(sum(error_pred_800_m*error_pred_800_m)/length(error_pred_800_m))
+
+
+rmse_m <- rbind(rmse_100_m, rmse_200_m, rmse_300_m, rmse_500_m, rmse_700_m, rmse_800_m)
+rmse_m <- cbind(num_arb, rmse_m)
+
+plot(rmse_m, ylab = "RMSE (m=p/2", xlab="#Tree", type = 'line')
+
+pred_100_p2 <- predict(rf_100_p2, data = test_under)$predictions
+error_pred_100_p2 <- test_y_under - pred_100_p2
+
+pred_200_p2 <- predict(rf_200_p2, data = test_under)$predictions
+error_pred_200_p2 <-test_y_under- pred_200_p2
+
+pred_300_p2 <- predict(rf_300_p2, data = test_under)$predictions
+error_pred_300_p2 <-test_y_under- pred_300_p2
+
+pred_500_p2 <- predict(rf_500_p2, data = test_under)$predictions
+error_pred_500_p2 <-test_y_under- pred_500_p2
+
+pred_700_p2 <- predict(rf_700_p2, data = test_under)$predictions
+error_pred_700_p2 <-test_y_under- pred_700_p2
+
+pred_800_p2 <- predict(rf_100_p2, data = test_under)$predictions
+error_pred_800_p2 <-test_y_under- pred_800_p2
+
+rmse_100_p2 <- sqrt(sum(error_pred_100_p2*error_pred_100_p2)/length(error_pred_100_p2))
+rmse_200_p2 <- sqrt(sum(error_pred_200_p2*error_pred_200_p2)/length(error_pred_200_p2))
+rmse_300_p2 <- sqrt(sum(error_pred_300_p2*error_pred_300_p2)/length(error_pred_300_p2))
+rmse_500_p2 <- sqrt(sum(error_pred_500_p2*error_pred_500_p2)/length(error_pred_500_p2))
+rmse_700_p2 <- sqrt(sum(error_pred_700_p2*error_pred_700_p2)/length(error_pred_700_p2))
+rmse_800_p2 <- sqrt(sum(error_pred_800_p2*error_pred_800_p2)/length(error_pred_800_p2))
+
+rmse_p2 <- rbind(rmse_100_p2, rmse_200_p2, rmse_300_p2, rmse_500_p2, rmse_700_p2, rmse_800_p2)
+rmse_p2 <- cbind(num_arb, rmse_p2)
+
+plot(rmse_p2, ylab = "RMSE (m=sqrt(P)", xlab="#Tree", type = 'line')
+
+```
+
+
+```{r guardar modelos}
+
+save(rf_100_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf100_m.Rdata")
+save(rf_200_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf200_m.Rdata")
+save(rf_300_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf300_m.Rdata")
+save(rf_500_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf500_m.Rdata")
+save(rf_700_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf700_m.Rdata")
+save(rf_800_m, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf800_m.Rdata")
+save(rf_100_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf100_p.Rdata")
+save(rf_200_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf200_p.Rdata")
+save(rf_300_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf300_p.Rdata")
+save(rf_500_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf500_p.Rdata")
+save(rf_700_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf700_p.Rdata")
+save(rf_800_p, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf800_p.Rdata")
+save(rf_100_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf100_p2.Rdata")
+save(rf_200_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf200_p2.Rdata")
+save(rf_300_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf300_p2.Rdata")
+save(rf_500_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf500_p2.Rdata")
+save(rf_700_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf700_p2.Rdata")
+save(rf_800_p2, file = "C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/rf800_p2.Rdata")
+
+
+
+```
+
+
+
+### 14. Escoge un random forest para hacer las predicciones. Grafica la importancia de las variables. Interpreta 
+
+```{r}
+# Prediccion 
+y_pred_pruned <- predict(arbol_pruning, newdata = testx,
+                        type = "vector")
+# Matriz de confusión
+  table(predicted = y_pred_pruned, actual = test$churn)
+#Guardamos prediccion del arbol junto a la del LASSO
+predicciones <- eval %>% select(customer, churn, y_pred) %>%
+                         rename(Y_lasso = y_pred) %>%
+                         mutate(Y_prunedtree = as.numeric(y_pred_pruned))
+
+
+
+```
+
+
+### 15. Genera las predicciones OOS para el random forest. Guardalas en la misma data.frame que los otros modelos 
+
+```{r}
+# Generamos las predicciones puntuales del modelo
+prediccion_forest <- predict(random_forest,
+                             data = validation_set%>%select(-c(customer,treat,churn)),
+                             type = "response")
+pred_forest <- prediccion_forest$predictions
+```
+
+
+
+### 16 (2pts). Corre el mismo forest pero ahora con `probability = T`. Esto generará predicciones númericas en lugar de categóricas. Genera las predicciones continuas y guardalas en el mismo data frame
+
+
+### 17 (4 pts). Genera graficas de las curvas ROC para los tres modelos. Cual parece ser mejor?
+
+
+
+### 18. Genera una tabla con el AUC ROC. Cuál es el mejor modelo ? 
+
+
+### 19 (2pts). Escoge un punto de corte para generar predicciones categoricas para el LASSO basado en la Curva ROC. Genera las matrices de confusión para cada modelo. Compáralas. Qué tipo de error es mas pernicioso? 
+
+
+### 20 (2pts). Finalmente, construye una lift table. Esto es, para 20 grupos del score predecido, genera 1) El promedio de las predicciones, 2) el promedio del churn observado. Existe monotonía? El mejor algoritmo es monotónico? (Tip: usa `ntile` para generar los grupos a partir de las predicciones)
+
+
+
+### 21. Concluye. Que estrategia harías con este modelo? Cómo generarías valor a partir de el?
+
+
