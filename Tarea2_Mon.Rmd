@@ -363,6 +363,12 @@ predicciones <- eval %>% select(customer, churn, y_pred) %>%
 
 library(ranger) #Más rápido que randomForest
 
+#B: tamaño de la submuestra --> decidir m del no. columnas p
+p = ncol(train_un_x)
+m1 = p
+m2 = p/2
+m3 = sqrt(p)
+
 detectCores()
 cl<-makeCluster(12)
 cl
@@ -370,49 +376,129 @@ cl
 # Estimation
 a<-Sys.time()
 
-rf_100 <-ranger(churn~., data = train_un, classification = T, num.trees = 100)
-rf_200 <-ranger(churn~., data = train_un, classification = T, num.trees = 200)
-rf_300 <-ranger(churn~., data = train_un, classification = T, num.trees = 300)
-rf_500 <-ranger(churn~., data = train_un, classification = T, num.trees = 500)
-rf_700 <-ranger(churn~., data = train_un, classification = T, num.trees = 700)
-rf_800 <-ranger(churn~., data = train_un, classification = T, num.trees = 800, 
-                importance = 'impurity_corrected')
+# m1
+rf_100_m1 <-ranger(churn~., data = train_un, classification = T, num.trees = 100, 
+                mtry = m1,importance = 'impurity')
+rf_200_m1 <-ranger(churn~., data = train_un, classification = T, num.trees = 200, 
+                mtry = m1,importance = 'impurity')
+rf_300_m1  <-ranger(churn~., data = train_un, classification = T, num.trees = 300, 
+                mtry = m1,importance = 'impurity')
+rf_500_m1  <-ranger(churn~., data = train_un, classification = T, num.trees = 500, 
+                mtry = m1,importance = 'impurity')
+rf_700_m1 <-ranger(churn~., data = train_un, classification = T, num.trees = 700, 
+                mtry = m1,importance = 'impurity')
+rf_800_m1  <-ranger(churn~., data = train_un, classification = T, num.trees = 800, 
+                mtry = m1,importance = 'impurity')
+
+# m2
+rf_100_m2 <-ranger(churn~., data = train_un, classification = T, num.trees = 100, 
+                mtry = m2,importance = 'impurity')
+rf_200_m2 <-ranger(churn~., data = train_un, classification = T, num.trees = 200, 
+                mtry = m2,importance = 'impurity')
+rf_300_m2  <-ranger(churn~., data = train_un, classification = T, num.trees = 300, 
+                mtry = m2,importance = 'impurity')
+rf_500_m2  <-ranger(churn~., data = train_un, classification = T, num.trees = 500, 
+                mtry = m2,importance = 'impurity')
+rf_700_m2 <-ranger(churn~., data = train_un, classification = T, num.trees = 700, 
+                mtry = m2,importance = 'impurity')
+rf_800_m2  <-ranger(churn~., data = train_un, classification = T, num.trees = 800, 
+                mtry = m2,importance = 'impurity')
+
+# m3
+rf_100_m3 <-ranger(churn~., data = train_un, classification = T, num.trees = 100, 
+                mtry = m3,importance = 'impurity')
+rf_200_m3 <-ranger(churn~., data = train_un, classification = T, num.trees = 200, 
+                mtry = m3,importance = 'impurity')
+rf_300_m3  <-ranger(churn~., data = train_un, classification = T, num.trees = 300, 
+                mtry = m3,importance = 'impurity')
+rf_500_m3  <-ranger(churn~., data = train_un, classification = T, num.trees = 500, 
+                mtry = m3,importance = 'impurity')
+rf_700_m3 <-ranger(churn~., data = train_un, classification = T, num.trees = 700, 
+                mtry = m3,importance = 'impurity')
+rf_800_m3  <-ranger(churn~., data = train_un, classification = T, num.trees = 800, 
+                mtry = m3,importance = 'impurity')
 
 Sys.time()-a
 #save(rf, file ='rf_100.Rdata')
 stopCluster(cl)
 
 # Guardar prediction error del OOB
-MSE_100 <- rf_100$prediction.error
-MSE_200 <- rf_200$prediction.error
-MSE_300 <- rf_300$prediction.error
-MSE_500 <- rf_500$prediction.error
-MSE_700 <- rf_700$prediction.error
-MSE_800 <- rf_800$prediction.error
- 
-MSE <- as.data.frame(cbind(rf_100$prediction.error, rf_200$prediction.error, rf_300$prediction.error,
-               rf_500$prediction.error, rf_700$prediction.error, rf_800$prediction.error ))
+MSE_100_m1 <- rf_100_m1$prediction.error
+MSE_200_m1 <- rf_200_m1$prediction.error
+MSE_300_m1 <- rf_300_m1$prediction.error
+MSE_500_m1  <- rf_500_m1$prediction.error
+MSE_700_m1  <- rf_700_m1$prediction.error
+MSE_800_m1  <- rf_800_m1$prediction.error
 
-No.Tree <- cbind(100,200,300,500,700,800)
-MSE_RF <- t(as.data.frame(rbind(No.Tree, MSE)))
+oob_m1 <- as.data.frame(cbind(rf_100_m1$prediction.error, rf_200_m1$prediction.error,
+                              rf_300_m1$prediction.error,  rf_500_m1$prediction.error,
+                              rf_700_m1$prediction.error, rf_800_m1$prediction.error ))
 
-kable(MSE_RF,
-      col.names = c("No.Tree", "MSE"), 
-      caption = "Prediction error" ) 
+MSE_100_m2 <- rf_100_m2$prediction.error
+MSE_200_m2 <- rf_200_m2$prediction.error
+MSE_300_m2 <- rf_300_m2$prediction.error
+MSE_500_m2  <- rf_500_m2$prediction.error
+MSE_700_m2  <- rf_700_m2$prediction.error
+MSE_800_m2  <- rf_800_m2$prediction.error
+
+oob_m2 <- as.data.frame(cbind(rf_100_m2$prediction.error, rf_200_m2$prediction.error,
+                              rf_300_m2$prediction.error,  rf_500_m2$prediction.error,
+                              rf_700_m2$prediction.error, rf_800_m2$prediction.error ))
+
+MSE_100_m3 <- rf_100_m3$prediction.error
+MSE_200_m3 <- rf_200_m3$prediction.error
+MSE_300_m3 <- rf_300_m3$prediction.error
+MSE_500_m3  <- rf_500_m3$prediction.error
+MSE_700_m3  <- rf_700_m3$prediction.error
+MSE_800_m3  <- rf_800_m3$prediction.error
+
+oob_m3 <- as.data.frame(cbind(rf_100_m3$prediction.error, rf_200_m3$prediction.error,
+                              rf_300_m3$prediction.error,  rf_500_m3$prediction.error,
+                              rf_700_m3$prediction.error, rf_800_m3$prediction.error ))
+
+No.Tree <- t(cbind(100,200,300,500,700,800))
+#MSE_RF <- t(as.data.frame(rbind(No.Tree, MSE)))
+
+#kable(MSE_RF,
+ #     col.names = c("No.Tree", "MSE"), 
+  #    caption = "Prediction error" ) 
+
+
+oob <- cbind(t(oob_m1), t(oob_m2), t(oob_m3))
+MSE<- cbind(No.Tree, oob)
+
+colnames(MSE) <- cbind("No.Tree","p","p2","sqrtp")
+MSE <- as.data.frame(MSE)
+
+
+ ggplot(MSE) +
+  geom_line(aes(x=No.Tree, y=p), color = 'red')+
+  geom_line(aes(x=No.Tree, y=p2), color = 'blue')+
+  geom_line(aes(x=No.Tree, y=sqrtp), color = 'green')+
+  labs(title = "Error de predicción OOB para diferentes no. columnas",
+       subtitle = "Rojo = p, Azul = p/2, Verde = raiz(p)",
+       x = "Número de arboles", y = "Error cuadrático medio")+
+    theme(plot.title = element_text(hjust = 0.5))+
+    theme_bw() 
+   
 ```
 
 ### 14. Escoge un random forest para hacer las predicciones. Grafica la importancia de las variables. Interpreta 
 
 ```{r Predic RF e importancia var}
-#Escogemos el random forest con 800 árboles
+#Escogemos el random forest con 800 árboles y m=sqrt(p)
+#importance_pvalues(rf_800_m3)
+
+importance <- rf_800_m3$variable.importance
 
 #Most important variables
-important_var <- as.data.frame(importance_pvalues(rf_800)) %>%
-  filter(pvalue < 0.01) %>%
+#important_var <- as.data.frame(importance_pvalues(rf_800)) %>%
+important_var <- as.data.frame(importance) %>%
+  #filter(pvalue < 0.01) %>%
   arrange(desc(importance))
 
 kable(important_var,
-      caption = "Most important variables (pvalue<0.01)")
+      caption = "Most important variables")
  
 ```
 
@@ -420,12 +506,11 @@ kable(important_var,
 ### 15. Genera las predicciones OOS para el random forest. Guardalas en la misma data.frame que los otros modelos 
 
 ```{r Predic OOS}
-#Por efectos prácticos selecciono el RF con 700 árboles
 
 # Out of Bag:  
-oob <- rf_700$predictions
+oob <- rf_800_m3$predictions
 # Prediction vectors:  
-pred_val<-predict(rf_700, data = validation)$predictions
+pred_val<-predict(rf_800_m3, data = validation)$predictions
 
 #Guardamos prediccion del random forest junto al resto 
 predicciones <- predicciones %>% 
@@ -437,10 +522,13 @@ predicciones <- predicciones %>%
 ### 16 (2pts). Corre el mismo forest pero ahora con `probability = T`. Esto generará predicciones númericas en lugar de categóricas. Genera las predicciones continuas y guardalas en el mismo data frame
 
 ```{r Predict RF numérico}
-rf_700_cont <-ranger(churn~., data = train_un, probability = T, num.trees = 700)
+#rf_700_cont <-ranger(churn~., data = train_un, probability = T, num.trees = 700)
+
+rf_800_m3_cont  <-ranger(churn~., data = train_un, probability = T, num.trees = 800, 
+                mtry = m3, importance = 'impurity')
 
 # Prediction vectors:  
-pred_val1<-predict(rf_700_cont, data = validation)$predictions
+pred_val1<-predict(rf_800_m3_cont, data = validation)$predictions
 
 #Guardamos prediccion del random forest junto al resto 
 predicciones <- predicciones %>% 
@@ -448,6 +536,7 @@ predicciones <- predicciones %>%
                                 Y_randomfor_prob1 = as.numeric(pred_val1[,2]))
 
 ```
+
 
 ### 17 (4 pts). Genera graficas de las curvas ROC para los tres modelos. Cual parece ser mejor?
 
@@ -498,18 +587,18 @@ kable(AUC_ROC,
 
 rm(Modelos, AUC)
 ```
-Todos los modelos tienen un AUC por debajo de 0.5, lo que indica que en general son malos prediciendo.
-
+Todos los modelos tienen un AUC por debajo de 0.5, lo que indica que en general son malos prediciendo. 
 
 ### 19 (2pts). Escoge un punto de corte para generar predicciones categoricas para el LASSO basado en la Curva ROC. Genera las matrices de confusión para cada modelo. Compáralas. Qué tipo de error es mas pernicioso? 
 
 ```{r Matriz de confusion}
-#Punto de corte: 0.5
+#Punto de corte: 0.4
 
 #predic LASSO
 predicciones <- predicciones %>%
-  mutate(y_lasso_cat = ifelse(Y_lasso < 0.5, 0, 1),
-         y_pruned_cat = ifelse(Y_lasso < 0.5, 0, 1))
+  mutate(y_lasso_cat = ifelse(Y_lasso < 0.4, 0, 1),
+         y_pruned_cat = ifelse(Y_prunedtree < 0.4, 0, 1),
+         y_randfor_cat = ifelse(Y_randomfor_prob1 < 0.4, 0, 1))
 
 # Matriz de confusión
  paste("La matriz de confusión para el CV LASSO es:" )
@@ -535,8 +624,11 @@ paste("El porcentaje de acierto de un CV Pruned tree  es de:",
  paste("El porcentaje de acierto de un Random Forest es de :", 
        accuracy(predicted = predicciones$Y_randomfor, actual = test$churn), "%")
  
+
 ```
 
-Se elige como punto de corte 0.5, por lo que todo valor <0.5 se considera como 0, y cualquier valor >=0.5 se considera como 1. 
+El error más pernicioso en estos modelos es el error tipo II: NRHo cuando Ho: abandono=0.
+Se elige como punto de corte 0.4 dado que nuestro problema son los falsos negativos. 
 
-El Accuracy es mayor para el modelo de Random Forest, con un porcentaje de acierto del 59%.
+El Accuracy es mayor para el modelo de Random Forest, con un porcentaje de acierto del 59.4%.
+
