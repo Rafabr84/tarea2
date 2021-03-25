@@ -49,14 +49,11 @@ Si se puede, tenemos datos que nos ayudan a ver que usuarios se quedaron y cuale
 
 2. Cuáles son las variables que explican en mayor medida el abandono? 
 
-
-
 3. Qué incentivos da Cell2Cell a sus usarios para prevenir el abandono?
 
 4. Cuál es el valor de una estrategia de prevención de abandono focalizada y cómo difiere entre los segmentos de los usuarios? Qué usuarios deberían de recibir incentivos de prevención? Qué montos de incentivos
 
 Nota: Voy a evaluar las tareas con base en la respuesta a cada pregunta. Como hay algunas preguntas que no tienen una respuesta clara, al final ponderaré de acuerdo al poder predictivo de su modelo vs las respuestas sugeridas. 
-
 
 
 \newpage
@@ -137,7 +134,6 @@ cell2cell$directas[cell2cell$directas == "NA"] <- 0
 cell2cell$phones[cell2cell$phones == "NA"] <- 1
 cell2cell$models[cell2cell$models == "NA"] <- 1
 
-
 # Igualando al promedio
 cell2cell$age1[cell2cell$age1 == 0] <- mean(cell2cell$age1)
 cell2cell$age1[cell2cell$age2 == 0] <- mean(cell2cell$age2)
@@ -155,42 +151,7 @@ colnames(faltantes) <- "Porcentaje Faltantes"
 
 faltantes <- faltantes %>% 
   arrange(desc(`Porcentaje Faltantes`))
-
-kable(faltantes, caption = "Tabla para variables NA",
-      col.names = c("Porcentaje"), 
-      digits = 3)
-
-
-
 ```
-
-*Hay pocas observaciones faltantes, distribuidas en las siguientes columnas:
-  recchrge - recurring charge, el valor promedio del plan de consumo;
-  overage - el exceso de minutos de llamadas;
-  roam - el número de llamadas en roaming;
-  changem - el cambio % en la utilización de minutos;
-  changer - el cambio % en el gasto; 
-  revenue - el gasto promedio; 
-  mou - los minutos utilizados por mes;
-  phones - el número de teléfonos que el usario ha utilizado;
-  models - el número de modelos de teléfono que el usuario ha utilizado;
-  age1 - la edad del 1er miembro del hogar;
-  age2 - la edad del 2do miembro del hogar;
-  eqpdays - el número de dias com el teléfono; y
-  directas - el número promedio de llamadas con asistencia.
-Hay observaciones que no podemos estimar o soponer y, así, se propone quitarlas
-de la base. Son las observaciones contenidas en: recchrge, overage, changem, 
-changer, eqpdays, revenue y mou.
-Otras observaciones podemos suponer que los NAs serían 0 (roam y directas) o que 
-tienen el valor de 1 (phones y models. O sea, se supone que el usurario ha 
-tenido apenas un teléfono con la comopañia).
-La variable de edad (age1 y age2) tiene pocos NAs, pero presenta vários valores
-iguales a 0 (más de 20 mil observaciones). Así, se propone sustituyer los NAs y
-los valores 0 por el promedio.
-Además de NAs, la variable de días con el equipo (eqpdays) y de costo del plan 
-(rechchrege) presentan unos pocos valores negativos que no hacen sentido. 
-Se propone quitar los valores negativos de la base. 
-
 
 ### 2. Tabula la distribución de la variable `churn`. Muestra la frecuencia absoluta y relativa. Crees que se debe hacer oversampling/undersamping?  
 
@@ -209,10 +170,7 @@ knitr::kable(freq.tab,
              digits = 2)
 ```
 
-
-
 ### 3. (2 pts) Divide tu base en entrenamiento y validación (80/20). Además, considera hacer oversampling (SMOTE) o undersampling. (Tip: Recuerda que el objetivo final es tener muestra ~balanceada en el traning set. En el validation la distribución debe ser la original)
-
 
 Vamos a hacer el Undersampling. Para esto sólo necesitamos utilizar la librería sample incluida en R.
 Esto nos permite tomar muestras aleatorias, unicamente hay que decirle de que tamaño, en este caso serán del grupo más chico (los que se abandonaron o churn=1).
@@ -240,7 +198,7 @@ Dividimos la base en entrenamiento y validacion y revisamos que la base de entre
 ```{r}
 # Base de entrenamiento (80%) 
 training_set <- cell2cell%>%
-  filter(treat=0)
+  filter(treat==0)
 #Base de validacion (20%)
 validation_set <- cell2cell%>%
   filter(treat==1)
@@ -297,19 +255,22 @@ cl <- makeCluster(8)
 cl
 # Estimar CV Logit Lasso on 5 folds
 lasso_logit <- cv.gamlr(x=Xs, y=y, nfold=5, verb=T, cl = cl, family='binomial')
-# Cuando corremos algo de forma paralelizado la computadora se hace menos poderosa
-# entonces mejor volver a juntar los nucleos
 
-# Prediciendo.  
-y_pred<- predict(lasso$gamlr, testx ,type ='response',select = lasso$seg.min)
+data = cell2cell
+set.seed(101)
+sample <- sample.int(n = nrow(data), size = floor(.80*nrow(data)), replace = F)
+test  <- data[-sample, ]
+
+# Prediciendo
+y_pred<- predict(lasso$gamlr, test ,type ='response',select = lasso_logit$seg.min)
 y_pred<-as.numeric(y_pred)
 
+# Cuando corremos algo de forma paralelizado la computadora se hace menos poderosa
+# entonces mejor volver a juntar los nucleos
 stopCluster(cl)
 save(lasso_logit, file = 'C:/Users/Jose Pablo Garcia/Box Sync/A - JP Files/Personal/ITAM/Economía Computacional/Tarea 2/models/lasso_logit.Rdata')
 rm(cl, Xs)
-
 ```
-
 
 ### 5. Grafica el Lasso de los coeficientes vs la complejidad del modelo.   
 
@@ -318,12 +279,9 @@ plot(lasso_logit)
 plot(lasso_logit$gamlr)
 ```
 
-
-
 \newpage
 
 ### 6 (2 pts). Cuál es la $\lambda$ resultante? Genera una tabla con los coeficientes que selecciona el CV LASSO. Cuántas variables deja iguales a cero? Cuales son las 3 variables más importantes para predecir el abandono? Da una explicación intuitiva a la última pregunta
-
 
 Las 3 variables, sin contar el intercepto, con mayor importancia son: retcall, creditaa, refurb.
 - retcall: llamadas realizadas por el cliente al equipo de retención
@@ -333,9 +291,8 @@ Las 3 variables, sin contar el intercepto, con mayor importancia son: retcall, c
 A priori, podríamos pensar que los clientes que marcaron al equipo de retencion buscan alguna promoción para no irse y al no conseguiirla abandonan, adicionalmente aquellos que tienen un mayor riesgo crediticio aa disminuye la probabilidad de irse. Por último aquellos que tienen equipos revendidos pueden ser más suceptibles a abandonar debido a que sus equipos son más baratos y por lo tanto de menor calidad, provocando que su servicio sea malo y por último se vayan antes.
 
 ```{r 6.Coefs CV LASSO}
-
-lambda_min_under <- (lasso_under$lambda.min) 
-lambda_1std_under <-(lasso_under$lambda.1se) 
+lambda_min_under <- (lasso_logit$lambda.min)
+lambda_1std_under <-(lasso_logit$lambda.1se)
 
 tabla_lambda <- rbind(lambda_min_under, lambda_1std_under)
 
@@ -349,7 +306,7 @@ cat("La Lambda que 1 Std del modelo es: ",lambda_1std_under,"\n")
 
 #Tabla coefs que selecciona el LASSO
 #coef(lasso, select="min")
-B <- coef(lasso)[-1,] 
+B <- coef(lasso_logit)[-1,] 
 B[c(which.min(B),which.max(B))]
 coefs <- as.data.frame(B) %>%
   filter(B !=0)
@@ -370,10 +327,7 @@ coefs_mas <- head(coefs, 4)
 kable(coefs_mas, caption = "Coeficientes con mayor peso",
       col.names = c("Coeficiente", "|Coeficiente|"),
       ddigits = 3)
-
-
 ```
-
 
 La variable 'retcall' se refiere al número de llamadas realizadas al usuario por el equipo de retención, en el que convencen al cliente de renovar y le ofrecen ofertas, por lo que tiene mucho sentido que sea una de las variablas más importantes para explicar la decisión de abandono o no.
 
@@ -381,13 +335,12 @@ Por otro lado, la variable 'creditaa' se refiere a una alta calificación credit
 
 Por último, la variable 'refurb' se refiere a la renovación del equipo, por lo que es lógico que ante dicha renovación cuando se acaba el mes de servicio, le inviten al cliente a continuar con el mismo y  no abandone.
 
-
 ### 7. Genera un data frame (usando el validation set) que tenga: `customer`, `churn` y las predicciones del LASSO. 
 
 ```{r 7.LASSO predic}
-
 #########################################################################   MONTSE
-eval <- validation %>%
+library(dplyr)
+eval <- validation_set %>%
                   select(customer, churn) %>%
                   mutate(churn_pred = y_pred)
 eval <- eval %>%
@@ -407,8 +360,6 @@ test_under <- as.numeric(unlist(test_under))
 typeof(test_under)
 
 X_validation <- sparse.model.matrix(~.+0, data=test_under)
-
-
 
 rediccion_1 <- drop(predict(lasso_under$gamlr, X_validation,
                       type='response',
@@ -464,9 +415,6 @@ AUC_2
 cat("El AUC del modelo de lambda minima es: ",AUC_1$.estimate,"\n",
     "El AUC del modelo de lambda 1 Std es: ",AUC_2$.estimate,"\n",
     "Por lo tanto: un chimpance aventando dardos lo hubiera hecho mejor")
-
-
-
 ```
 
 
@@ -966,5 +914,3 @@ ggplot(lift_table_rf, aes(x=score, y=value, fill=name))+
 ### 21. Concluye. Que estrategia harías con este modelo? Cómo generarías valor a partir de el?
 
 Se puede pensar en adaptar una estrategia de retencion enfocada hacia los clientes clasificados como propensos a abandonar. Dado que algunas de las variables relevantes fueron el numero de dias que llevaban con el equipo (>360 dias eran propensos a abandonar) se puede pensar en ofrecerles alguna promocion para renovar su equipo de celular. Adicionamente, una de las variables que ayuda a determinar el abandono fue si el cliente experimento una reparacion de celular, por lo que puede pensarse en buscar renovar los equipos dañados. 
-
-
